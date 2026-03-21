@@ -14,7 +14,7 @@ source .venv/bin/activate
 pip install --upgrade pip -q
 
 # 先装 CUDA 版 PyTorch（必须指定源，否则装到 CPU 版）
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cu124
 
 # 再装其他依赖
 pip install -r requirements-gpu.txt

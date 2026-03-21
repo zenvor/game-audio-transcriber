@@ -11,7 +11,6 @@ soundfile
 # 文本后处理（繁体转简体）
 opencc-python-reimplemented
 
-# 音效分类（YAMNet）
-tensorflow
-tensorflow-hub
-resampy
+# 音效分类（CLAP 零样本分类，laion-clap 依赖 torchvision）
+laion-clap
+torchvision

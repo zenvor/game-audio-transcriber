@@ -1,6 +1,6 @@
 # GPU (CUDA) 依赖
 # 注意：torch 需要从 PyTorch 官方 CUDA 源安装，不要直接 pip install torch
-# pip install torch --index-url https://download.pytorch.org/whl/cu124
+# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 faster-whisper
 ffmpeg-python
 soundfile
@@ -8,7 +8,6 @@ soundfile
 # 文本后处理（繁体转简体）
 opencc-python-reimplemented
 
-# 音效分类（YAMNet）
-tensorflow
-tensorflow-hub
-resampy
+# 音效分类（CLAP 零样本分类，laion-clap 依赖 torchvision）
+laion-clap
+torchvision
