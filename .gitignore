@@ -1,0 +1,41 @@
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+
+# Local assistant / tooling state
+.claude/
+
+# Python cache / build
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Logs
+*.log
+
+# Local environment files
+.env
+.env.*
+
+# Runtime input / output artifacts
+input/*
+output/*
+!input/.gitkeep
+!output/.gitkeep
