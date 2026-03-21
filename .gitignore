@@ -34,6 +34,9 @@ env/
 .env
 .env.*
 
+# Model weights
+models/*.pt
+
 # Runtime input / output artifacts
 input/*
 output/*
