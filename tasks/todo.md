@@ -12,8 +12,8 @@
 - [x] 补充仓库基础文件（`LICENSE`、`.editorconfig`）
 - [x] 为 `input/` 和 `output/` 添加占位文件，保留目录结构
 - [x] 验证 `git status` 输出符合预期
-- [ ] 执行首个提交
-- [ ] 验证提交结果
+- [x] 执行首个提交
+- [x] 验证提交结果
 
 ## 验收标准
 
@@ -32,3 +32,7 @@
 - 已验证 `git status --short --ignored`：
   - 待跟踪项为源码、脚本、文档、任务文件和目录占位文件
   - 已忽略项包含 `.claude/`、`output/results.json`、`output/results copy.json`
+- 已创建首个提交：`53d726a chore: initialize repository`
+- 提交后再次验证：
+  - 工作区无待提交文件
+  - 仅剩已忽略文件：`.claude/`、`output/results.json`、`output/results copy.json`
