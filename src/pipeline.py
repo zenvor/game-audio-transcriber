@@ -98,15 +98,14 @@ def run(input_dir: str, output_dir: str, device: str | None = None, skip_vad: bo
             result = transcriber.transcribe(path)
             results[filename] = {**result, "path": path}
 
-            if (i + 1) % config.LOG_INTERVAL == 0:
-                elapsed = time.time() - start_time
-                speed = (i + 1) / elapsed
-                eta = (len(todo) - i - 1) / speed
-                print(
-                    f"[{i+1}/{len(todo)}] {filename[:30]:<30} "
-                    f"| {result['lang']} | {result['text'][:25]} "
-                    f"| 速度 {speed:.1f}个/s | 预计剩余 {eta/60:.1f}min"
-                )
+            elapsed = time.time() - start_time
+            speed = (i + 1) / elapsed
+            eta = (len(todo) - i - 1) / speed if speed > 0 else 0
+            print(
+                f"[{i+1}/{len(todo)}] {filename[:30]:<30} "
+                f"| {result['lang']} | {result['text'][:40]} "
+                f"| {speed:.1f}/s | 剩余 {eta/60:.1f}min"
+            )
 
             # 每 500 个存一次，防止中途丢失
             if (i + 1) % 500 == 0:

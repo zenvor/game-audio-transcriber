@@ -13,6 +13,9 @@ silero-vad
 ffmpeg-python
 soundfile
 
+# 文本后处理（繁体转简体）
+opencc-python-reimplemented
+
 # 音效分类（YAMNet）
 tensorflow
 tensorflow-hub

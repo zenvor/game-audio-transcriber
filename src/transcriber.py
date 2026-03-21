@@ -7,6 +7,7 @@ GPU 机器：使用 faster-whisper（CUDA 加速）
 from __future__ import annotations
 
 import platform
+import opencc
 import config
 
 IS_MAC_SILICON = (
@@ -31,7 +32,15 @@ class Transcriber:
         else:
             self.backend = "faster-whisper"
 
+        self._t2s = opencc.OpenCC("t2s")
         print(f"转写后端: {self.backend} | 模型: {config.WHISPER_MODEL}")
+
+    def _normalize_text(self, text: str, lang: str) -> str:
+        """后处理：中文繁转简，英文标题化"""
+        if lang == "zh":
+            return self._t2s.convert(text)
+        else:
+            return text.title()
 
     def _load(self):
         if self._model is not None:
@@ -76,6 +85,7 @@ class Transcriber:
         )
         text = result.get("text", "").strip()
         lang = result.get("language", "unknown")
+        text = self._normalize_text(text, lang)
         # 计算时长
         segments = result.get("segments", [])
         duration = segments[-1]["end"] if segments else 0.0
@@ -91,10 +101,12 @@ class Transcriber:
         )
         segments = list(segments)
         text = "".join(s.text for s in segments).strip()
+        lang = info.language
+        text = self._normalize_text(text, lang)
         duration = segments[-1].end if segments else 0.0
 
         return {
             "text": text,
-            "lang": info.language,
+            "lang": lang,
             "duration": round(duration, 2)
         }
