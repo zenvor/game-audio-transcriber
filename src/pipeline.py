@@ -1,6 +1,6 @@
 """
 pipeline.py — 完整处理流水线
-扫描 → 全量 Whisper 转写 → no_speech_prob 分流 → YAMNet 音效分类
+扫描 → 全量 Whisper 转写 → no_speech_prob 分流 → CLAP 音效分类
 """
 
 from __future__ import annotations
@@ -36,6 +36,30 @@ def save_results(results: dict, output_path: str):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
+
+
+def run_sfx_only(output_dir: str):
+    """仅对已有 sfx_results.json 中的音效文件重新跑 CLAP 分类"""
+    start_time = time.time()
+    sfx_out_path = os.path.join(output_dir, "sfx_results.json")
+
+    existing_sfx = load_existing(sfx_out_path)
+    if not existing_sfx:
+        print(f"未找到已有音效结果: {sfx_out_path}")
+        return
+
+    # 从已有结果中提取文件路径
+    sfx_files = [entry["path"] for entry in existing_sfx.values() if "path" in entry]
+    print(f"从 sfx_results.json 读取到 {len(sfx_files)} 个音效文件，开始 CLAP 重新分类...")
+
+    from src.classifier import batch_classify
+    sfx_results = batch_classify(sfx_files)
+    save_results(sfx_results, sfx_out_path)
+
+    elapsed = time.time() - start_time
+    print(f"\n完成！重新分类 {len(sfx_results)} 个音效文件")
+    print(f"总耗时: {elapsed/60:.1f} 分钟")
+    print(f"结果: {sfx_out_path}")
 
 
 def run(input_dir: str, output_dir: str, device: str | None = None):
@@ -90,7 +114,7 @@ def run(input_dir: str, output_dir: str, device: str | None = None):
                     "path": path,
                 }
             else:
-                # 纯音效，收集待 YAMNet 分类
+                # 纯音效，收集待 CLAP 分类
                 sfx_candidates.append(path)
 
             elapsed = time.time() - start_time
@@ -114,9 +138,9 @@ def run(input_dir: str, output_dir: str, device: str | None = None):
     # 4. 保存人声转写结果
     save_results(speech_results, output_path)
 
-    # 5. 对纯音效文件进行 YAMNet 分类
+    # 5. 对纯音效文件进行 CLAP 分类
     if sfx_candidates:
-        print(f"\n音效文件 {len(sfx_candidates)} 个，开始 YAMNet 分类...")
+        print(f"\n音效文件 {len(sfx_candidates)} 个，开始 CLAP 分类...")
         from src.classifier import batch_classify
         sfx_new = batch_classify(sfx_candidates)
         sfx_results = dict(existing_sfx)

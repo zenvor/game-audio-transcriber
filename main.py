@@ -9,7 +9,7 @@ main.py — 入口
 
 import argparse
 import config
-from src.pipeline import run
+from src.pipeline import run, run_sfx_only
 
 
 def parse_args():
@@ -18,6 +18,7 @@ def parse_args():
     parser.add_argument("--output",   default=config.OUTPUT_DIR, help="输出目录")
     parser.add_argument("--device",   default=None,              help="cuda / cpu（默认自动）")
     parser.add_argument("--model",    default=None,              help="覆盖 config 中的模型")
+    parser.add_argument("--sfx-only", action="store_true",       help="仅重新分类音效文件（跳过 Whisper 转写）")
     return parser.parse_args()
 
 
@@ -27,8 +28,11 @@ if __name__ == "__main__":
     if args.model:
         config.WHISPER_MODEL = args.model
 
-    run(
-        input_dir=args.input,
-        output_dir=args.output,
-        device=args.device,
-    )
+    if args.sfx_only:
+        run_sfx_only(output_dir=args.output)
+    else:
+        run(
+            input_dir=args.input,
+            output_dir=args.output,
+            device=args.device,
+        )
