@@ -10,7 +10,6 @@ game-audio-transcriber/
 ├── output/             # 转写结果输出
 ├── src/
 │   ├── __init__.py
-│   ├── vad_filter.py   # 人声检测，过滤纯音效
 │   ├── classifier.py   # YAMNet 音效分类
 │   ├── transcriber.py  # Whisper 转写核心
 │   └── pipeline.py     # 完整流水线入口
@@ -27,11 +26,12 @@ game-audio-transcriber/
 
 ```
 所有 wav 文件
-    ↓
-VAD 检测
-    ├── 有人声 → Whisper 转写 → 输出文字
-    └── 纯音效 → YAMNet 分类 → 输出音效类别标签
+    ↓ Whisper 全量转写
+    ├── no_speech_prob 低 → 有人声 → 保留转写文字 → results.json
+    └── no_speech_prob 高 → 纯音效 → YAMNet 分类 → sfx_results.json
 ```
+
+利用 Whisper 返回的 `no_speech_prob`（无人声概率）自动区分语音和音效，无需额外的 VAD 模型。
 
 ## 模型说明
 
@@ -75,7 +75,6 @@ python main.py
 ```bash
 python main.py --input ./你的音频目录    # 指定输入目录（默认 ./input）
 python main.py --output ./你的输出目录   # 指定输出目录（默认 ./output）
-python main.py --skip-vad               # 跳过人声检测，全部直接转写
 python main.py --model medium           # 用较小模型（调试用）
 ```
 
@@ -100,8 +99,8 @@ python -m venv .venv
 # 升级 pip
 pip install --upgrade pip
 
-# 安装 CUDA 版 PyTorch（关键，不能漏 --index-url）
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+# 安装 CUDA 版 PyTorch（faster-whisper 的 CTranslate2 依赖其 CUDA 运行时库）
+pip install torch --index-url https://download.pytorch.org/whl/cu124
 
 # 安装其他依赖
 pip install -r requirements-gpu.txt
@@ -116,7 +115,6 @@ python main.py --device cuda
 ```powershell
 python main.py --device cuda --input .\你的音频目录    # 指定输入目录（默认 .\input）
 python main.py --device cuda --output .\你的输出目录   # 指定输出目录（默认 .\output）
-python main.py --device cuda --skip-vad               # 跳过人声检测，全部直接转写
 python main.py --device cuda --model medium           # 用较小模型（调试用）
 ```
 
@@ -134,7 +132,9 @@ output/
   "hero_win.wav": {
     "text": "胜利属于我们！",
     "lang": "zh",
-    "duration": 2.3
+    "duration": 2.3,
+    "no_speech_prob": 0.02,
+    "path": "./input/hero_win.wav"
   }
 }
 ```

@@ -4,11 +4,6 @@
 # Apple Silicon 优化的 Whisper
 mlx-whisper
 
-# VAD 人声检测
-torch
-torchaudio
-silero-vad
-
 # 音频处理
 ffmpeg-python
 soundfile

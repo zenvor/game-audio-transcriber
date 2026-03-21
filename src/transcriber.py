@@ -86,27 +86,38 @@ class Transcriber:
         text = result.get("text", "").strip()
         lang = result.get("language", "unknown")
         text = self._normalize_text(text, lang)
-        # 计算时长
         segments = result.get("segments", [])
         duration = segments[-1]["end"] if segments else 0.0
+        if segments:
+            no_speech_prob = sum(s["no_speech_prob"] for s in segments) / len(segments)
+        else:
+            no_speech_prob = 1.0
 
-        return {"text": text, "lang": lang, "duration": round(duration, 2)}
+        return {"text": text, "lang": lang, "duration": round(duration, 2), "no_speech_prob": round(no_speech_prob, 4)}
 
     def _transcribe_faster(self, audio_path: str) -> dict:
+        print(f"  [DEBUG] 开始转写: {audio_path}", flush=True)
         segments, info = self._model.transcribe(
             audio_path,
             language=config.LANGUAGE,
             beam_size=config.BEAM_SIZE,
             vad_filter=config.VAD_FILTER,
         )
+        print(f"  [DEBUG] transcribe() 返回，开始消费 segments...", flush=True)
         segments = list(segments)
+        print(f"  [DEBUG] segments 消费完成，共 {len(segments)} 段", flush=True)
         text = "".join(s.text for s in segments).strip()
         lang = info.language
         text = self._normalize_text(text, lang)
         duration = segments[-1].end if segments else 0.0
+        if segments:
+            no_speech_prob = sum(s.no_speech_prob for s in segments) / len(segments)
+        else:
+            no_speech_prob = 1.0
 
         return {
             "text": text,
             "lang": lang,
-            "duration": round(duration, 2)
+            "duration": round(duration, 2),
+            "no_speech_prob": round(no_speech_prob, 4),
         }

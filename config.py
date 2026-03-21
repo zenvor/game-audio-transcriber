@@ -23,14 +23,13 @@ WHISPER_MODEL = "large-v3-turbo" if IS_MAC_SILICON else "large-v3"
 DEVICE       = "cpu"                # 运行时可通过 --device cuda 覆盖
 COMPUTE_TYPE = "float16"            # GPU: float16 / CPU: int8
 
-# ── VAD 配置（人声检测）────────────────────────────────
-VAD_THRESHOLD  = 0.5    # 0~1，越高越严格（减少误判）
-VAD_MIN_SPEECH = 0.3    # 最短人声时长（秒），低于此判定为非人声
+# ── 人声/音效分流阈值 ──────────────────────────────────
+NO_SPEECH_THRESHOLD = 0.6  # Whisper no_speech_prob 高于此值判定为纯音效
 
 # ── 转写配置 ──────────────────────────────────────────
 LANGUAGE       = None   # None = 自动检测中英文
 BEAM_SIZE      = 5
-VAD_FILTER     = True   # Whisper 内置二次 VAD
+VAD_FILTER     = False  # 已用 no_speech_prob 分流，无需内置 VAD
 
 # ── 日志 ─────────────────────────────────────────────
 LOG_INTERVAL = 50       # 每处理 N 个文件打印一次进度
