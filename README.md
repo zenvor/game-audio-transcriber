@@ -43,7 +43,7 @@ game-audio-transcriber/
 
 **音效分类：**
 - CLAP（LAION，零样本音频分类，支持自定义标签）
-- 内置 47 个王者荣耀音效分类标签（战斗、技能、播报、地图、UI、环境、角色动作）
+- 内置 526 个王者荣耀音效分类标签（战斗、技能、UI、环境、角色动作等）
 - 首次运行自动下载模型权重，无需手动下载
 - 标签可在 `src/classifier.py` 中的 `LABELS` 列表自由修改
 
@@ -52,7 +52,7 @@ game-audio-transcriber/
 ### Mac M 系列（Apple Silicon）
 
 前置条件：
-- Python 3.9+
+- Python 3.10+（推荐 3.11，torch/CLAP 兼容性最佳）
 - ffmpeg 已装（`brew install ffmpeg`）
 
 **方式一：一键脚本**
@@ -76,7 +76,7 @@ pip install -r requirements-mac.txt
 python main.py
 ```
 
-首次运行会自动下载 large-v3-turbo 模型（约 3GB）和 CLAP 模型，之后走缓存。
+首次运行会自动下载 large-v3-turbo 模型（约 3GB）和 CLAP 模型（约 1.86GB），之后走缓存。
 
 常用参数：
 ```bash
