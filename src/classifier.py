@@ -66,9 +66,12 @@ def batch_classify(file_list: list[str], top_k: int = 3) -> dict:
 
     for i, path in enumerate(file_list):
         filename = Path(path).name
+        labels = classify(path, top_k)
+        text = " / ".join(l["label"] for l in labels if l["label"] != "unknown")
         results[filename] = {
+            "text": text,
             "type": "sfx",
-            "labels": classify(path, top_k),
+            "labels": labels,
             "path": path
         }
         if (i + 1) % 100 == 0:
