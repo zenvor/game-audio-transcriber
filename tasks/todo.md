@@ -36,3 +36,81 @@
 - 提交后再次验证：
   - 工作区无待提交文件
   - 仅剩已忽略文件：`.claude/`、`output/results.json`、`output/results copy.json`
+
+## 音频重命名任务
+
+### 目标
+
+根据 `output/results.json` 与 `output/sfx_results.json` 中已整理好的 `text` 字段，按语音和音效两大类整理音频，并保留原子目录。
+
+### 待办
+
+- [x] 检查两份结果文件的结构、路径字段和重名情况
+- [x] 实现独立的批量重命名脚本
+- [x] 默认支持 dry-run，并导出重命名计划
+- [x] 验证脚本在当前数据集上的输出是否合理
+
+### 重命名规则
+
+- 读取 `results.json` 和 `sfx_results.json` 中每条记录的 `path` 与 `text`
+- `text` 作为主文件名来源，但必须做非法字符清洗
+- 默认保留原始文件编号作为后缀，避免大量同名音频冲突
+- 输出到 `renamed_audio/speech/` 和 `renamed_audio/sfx/`
+- 在分类目录下保留原始子目录结构
+- 默认不立即执行，只有显式传入执行参数才真正复制整理
+
+### Review
+
+- 已新增脚本 `scripts/rename_audio_from_results.py`
+- 脚本读取 `results.json` 与 `sfx_results.json` 中的 `text`、`path`
+- 脚本把文件整理到 `renamed_audio/speech/` 与 `renamed_audio/sfx/`，并保留原子目录
+- 文件名清洗后按 `标注文本__原始编号.wav` 生成目标名，避免重名覆盖
+- 已兼容“原文件已被提前重命名”的场景，会自动回查 `__原始编号.wav`
+- 已用当前数据集完成 dry-run：
+  - `planned: 926`
+  - `speech: 327`
+  - `sfx: 599`
+  - 未发现 `conflict_target_exists` 或 `conflict_duplicate_target`
+- 已生成计划文件 `output/rename_plan.json`
+- 已在 README 增加使用说明，默认先预览，确认后再 `--apply`
+
+## 音频索引任务
+
+### 目标
+
+基于当前的 `output/rename_plan.json` 导出可检索的音频索引清单，便于后续查找、校对和交付。
+
+### 待办
+
+- [x] 检查 `rename_plan.json` 字段是否足够导出索引
+- [x] 实现索引导出脚本
+- [x] 导出 CSV 和 JSON 两种格式
+- [x] 验证导出数量与字段
+
+### 输出要求
+
+- CSV 适合表格查看
+- JSON 适合脚本消费
+- 至少包含：`category`、`original_name`、`text`、`source_path`、`target_path`、`status`
+
+### Review
+
+- 已新增脚本 `scripts/export_audio_index.py`
+- 基于 `output/rename_plan.json` 导出索引，避免重复扫描音频目录
+- 已生成：
+  - `output/audio_index.csv`
+  - `output/audio_index.json`
+- 已验证导出数量：
+  - CSV: 926 条
+  - JSON: 926 条
+- 已验证字段包含：
+  - `category`
+  - `status`
+  - `original_name`
+  - `text`
+  - `sanitized_text`
+  - `requested_source_path`
+  - `source_path`
+  - `target_dir`
+  - `target_path`
+  - `source_json`

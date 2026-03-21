@@ -191,3 +191,37 @@ output/
   }
 }
 ```
+
+## 批量分类整理音频
+
+当你已经在 `output/results.json` 和 `output/sfx_results.json` 里整理好 `text` 字段后，可以用脚本批量重命名原始音频。
+
+默认先做 dry-run，只生成计划，不直接改名：
+
+```bash
+python3 scripts/rename_audio_from_results.py
+```
+
+脚本会：
+
+- 读取两份结果文件中的 `path` 和 `text`
+- 清洗非法文件名字符
+- 将文件复制到 `renamed_audio/` 下
+- 按两大类分目录：`speech/` 和 `sfx/`
+- 保留原子目录结构，例如 `System_Voice`、`UI`
+- 生成目标文件名：`标注文本__原始编号.wav`
+- 输出计划到 `output/rename_plan.json`
+
+确认计划无误后，再实际执行重命名：
+
+```bash
+python3 scripts/rename_audio_from_results.py --apply
+```
+
+示例：
+
+```text
+input/System_Voice/Hector_Kill__01_8772748.wav
+→
+renamed_audio/speech/System_Voice/Hector_Kill__01_8772748.wav
+```
