@@ -1,11 +1,13 @@
 # game-audio-transcriber
 
-批量将游戏音频包（语音/音效）转写为文字。
+用于批量处理游戏音频资源的工具，支持语音转写、纯音效分类、语音备注纠错、文件整理与索引导出。
 
 ## 项目结构
 
 ```
 game-audio-transcriber/
+├── data/
+│   └── honor_of_kings_phrases.txt   # 王者荣耀短语词表（用于文本纠错）
 ├── input/              # 放原始音频文件（.wav）
 ├── output/             # 转写结果输出
 ├── src/
@@ -14,8 +16,11 @@ game-audio-transcriber/
 │   ├── transcriber.py  # Whisper 转写核心
 │   └── pipeline.py     # 完整流水线入口
 ├── scripts/
-│   ├── setup_mac.sh    # Mac M 系列环境安装
-│   └── setup_gpu.sh    # Linux GPU 机器环境安装
+│   ├── export_audio_index.py    # 导出音频索引
+│   ├── rename_audio_from_results.py   # 按结果整理音频
+│   ├── review_voice_texts.py    # 用 Gemini / OpenAI 纠正语音文本
+│   ├── setup_mac.sh             # Mac M 系列环境安装
+│   └── setup_gpu.sh             # Linux GPU 机器环境安装
 ├── config.py           # 配置文件
 ├── main.py             # 主入口
 ├── requirements-mac.txt
@@ -43,7 +48,7 @@ game-audio-transcriber/
 
 **音效分类：**
 - CLAP（LAION，零样本音频分类，支持自定义标签）
-- 内置 526 个王者荣耀音效分类标签（战斗、技能、UI、环境、角色动作等）
+- 内置数百个王者荣耀音效分类标签（战斗、技能、UI、环境、角色动作等）
 - 首次运行自动下载模型权重，无需手动下载
 - 标签可在 `src/classifier.py` 中的 `LABELS` 列表自由修改
 
@@ -182,6 +187,7 @@ output/
 {
   "attack_01.wav": {
     "type": "sfx",
+    "text": "近战武器攻击 / 暴击 / 受击",
     "labels": [
       {"label": "近战武器攻击", "score": 0.82},
       {"label": "暴击", "score": 0.11},
@@ -192,9 +198,78 @@ output/
 }
 ```
 
+## 用 OpenAI / Gemini 校正语音文本
+
+如果 `output/results.json` 里的语音备注存在错听，可以用 OpenAI 或 Gemini 做二次纠错。这里做的是“文本纠错”，不是重新听音频转写。该脚本不会覆盖原始 `text`，而是新增 `corrected_text`、`correction_status`、`correction_reason`、`correction_model`。
+
+先做 dry-run，查看候选短语和待处理样本：
+
+```bash
+python3 scripts/review_voice_texts.py --dry-run --limit 5
+```
+
+脚本内置 `gemini` 和 `openai` 两个 provider 预设，默认使用 `gemini`。其中：
+
+- `gemini` 使用 Gemini 原生 `generateContent` 接口
+- `openai` 使用 OpenAI Chat Completions 接口
+- 请求失败时会自动做有限次重试，避免瞬时网络抖动或限流导致大量条目直接标记为错误
+- 结果会按批次写回 JSON，而不是每处理一条就完整重写一次文件
+
+正式调用前先设置对应的 API key。
+
+Gemini：
+
+```bash
+export GEMINI_API_KEY="你的 Gemini API Key"
+```
+
+OpenAI：
+
+```bash
+export OPENAI_API_KEY="你的 OpenAI API Key"
+```
+
+然后执行纠错。
+
+Gemini（默认）：
+
+```bash
+python3 scripts/review_voice_texts.py
+```
+
+也可以显式指定：
+
+```bash
+python3 scripts/review_voice_texts.py --provider gemini
+```
+
+OpenAI：
+
+```bash
+python3 scripts/review_voice_texts.py --provider openai
+```
+
+常用参数：
+
+```bash
+python3 scripts/review_voice_texts.py --limit 20
+python3 scripts/review_voice_texts.py --force
+python3 scripts/review_voice_texts.py --provider gemini --model gemini-3-flash-preview
+python3 scripts/review_voice_texts.py --provider openai --model gpt-4.1-mini
+```
+
+脚本会自动：
+
+- 读取 `output/results.json`
+- 合并 `data/honor_of_kings_phrases.txt` 和现有结果中的高频短语
+- 把王者荣耀语境和候选短语一起发给所选模型
+- 将建议写回到 `corrected_text`
+
+如果你已经手动确认某些纠错结果不可靠，可以直接删除这四个新增字段，回退到原始 `text`。
+
 ## 批量分类整理音频
 
-当你已经在 `output/results.json` 和 `output/sfx_results.json` 里整理好 `text` 字段后，可以用脚本批量重命名原始音频。
+当你已经在 `output/results.json` 和 `output/sfx_results.json` 里整理好文本后，可以用脚本批量整理原始音频。
 
 默认先做 dry-run，只生成计划，不直接改名：
 
@@ -204,7 +279,9 @@ python3 scripts/rename_audio_from_results.py
 
 脚本会：
 
-- 读取两份结果文件中的 `path` 和 `text`
+- 读取两份结果文件中的 `path` 和文本字段
+- 对语音结果优先使用 `corrected_text`，没有时回退到 `text`
+- 按显式的 `speech` / `sfx` 类别处理两份结果文件，不依赖默认文件名推断类型
 - 清洗非法文件名字符
 - 将文件复制到 `renamed_audio/` 下
 - 按两大类分目录：`speech/` 和 `sfx/`
@@ -225,3 +302,26 @@ input/System_Voice/Hector_Kill__01_8772748.wav
 →
 renamed_audio/speech/System_Voice/Hector_Kill__01_8772748.wav
 ```
+
+## 导出音频索引
+
+整理计划生成后，可以导出 CSV / JSON 索引，方便人工校对和资产交付：
+
+```bash
+python3 scripts/export_audio_index.py
+```
+
+默认输出：
+
+```text
+output/audio_index.csv
+output/audio_index.json
+```
+
+索引会包含：
+
+- 原始文本 `text`
+- 校正文 `corrected_text`
+- 实际生效文本 `effective_text`
+- 文本来源 `text_source`
+- 源路径和目标路径

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 
 
@@ -14,6 +15,9 @@ FIELDS = [
     "status",
     "original_name",
     "text",
+    "corrected_text",
+    "effective_text",
+    "text_source",
     "sanitized_text",
     "requested_source_path",
     "source_path",
@@ -49,6 +53,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_plan(plan_path: Path) -> list[dict]:
+    if not plan_path.exists():
+        raise FileNotFoundError(f"重命名计划文件不存在: {plan_path}")
     with plan_path.open("r", encoding="utf-8") as fh:
         return json.load(fh)
 
@@ -87,7 +93,11 @@ def main() -> int:
     csv_path = (project_root / args.csv_out).resolve()
     json_path = (project_root / args.json_out).resolve()
 
-    rows = load_plan(plan_path)
+    try:
+        rows = load_plan(plan_path)
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     rows = filter_rows(rows, args.status)
     rows = serialize_rows(rows)
 

@@ -1,0 +1,48 @@
+欢迎来到王者荣耀
+欢迎来到王者峡谷
+全军出击
+准备迎战
+敌军还有5秒到达战场,请做好准备
+敌军还有十秒到达战场,请做好准备
+主宰黑暗暴君降临
+风暴龙王降临,决战开始!
+我方防御塔正在被攻击
+我方高地防御塔正在被攻击
+我方水晶正在被攻击
+保护我方防御塔
+保护我方水晶
+集合,保护我方水晶。
+集合进攻暴君
+集合,进攻龙王
+集合,进攻苍蓝石像。
+集合,进攻飞鸿石像!
+小心对方偷塔
+敌人偷塔,撤退
+拖住,我偷塔
+我要开加速了,靠近我
+我方英雄击杀了暴君
+敌方英雄已将暴君击杀
+防御塔护盾消失,炮车出击
+An Ally Has Been Slain!
+An Enemy Has Been Slain!
+You Have Slain An Enemy.
+You Have Been Slain.
+Your Team Has Destroyed A Turret.
+Your Turret Has Been Destroyed.
+First Blood!
+Double Kill!
+Triple Kill!
+Quadra Kill!
+Pentakill!
+Hexakill!
+Heptakill!
+Octokill!
+Shut Down.
+Executed.
+Victory!
+Defeat.
+Killing Spree!
+Rampage!
+Unstoppable.
+Godlike!
+Legendary!
