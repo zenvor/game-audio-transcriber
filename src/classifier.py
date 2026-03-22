@@ -5,6 +5,10 @@ classifier.py — 用 CLAP 对纯音效文件进行零样本分类标注
 
 from __future__ import annotations
 
+import io
+import os
+import gc
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +16,37 @@ import torch
 
 _model = None
 _text_embeddings = None
+_model_load_error: Exception | None = None
+
+
+def _is_env_flag_on(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_cuda_oom_error(exc: Exception) -> bool:
+    oom_types = []
+    torch_oom = getattr(torch, "OutOfMemoryError", None)
+    if isinstance(torch_oom, type):
+        oom_types.append(torch_oom)
+    cuda_oom = getattr(torch.cuda, "OutOfMemoryError", None)
+    if isinstance(cuda_oom, type):
+        oom_types.append(cuda_oom)
+    if oom_types and isinstance(exc, tuple(oom_types)):
+        return True
+    msg = str(exc).lower()
+    return "cuda out of memory" in msg or "cublas_status_alloc_failed" in msg
+
+
+def _release_cuda_memory() -> None:
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+    try:
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+    except Exception:
+        # 清理失败不应中断主流程。
+        pass
 
 # ── 王者荣耀音效分类标签 ──────────────────────────────────
 # 每项: (CLAP 匹配用英文描述, 中文显示名)
@@ -769,20 +804,35 @@ LABEL_NAMES = [name for _, name in LABELS]
 
 
 def _load_model():
-    global _model, _text_embeddings
+    global _model, _text_embeddings, _model_load_error
     if _model is not None:
         return _model, _text_embeddings
+    if _model_load_error is not None:
+        raise RuntimeError(f"CLAP 模型不可用: {_model_load_error}") from _model_load_error
 
     import laion_clap
 
+    if _is_env_flag_on("CLAP_OFFLINE"):
+        # 显式离线模式：仅使用本地缓存，避免 Windows 无网环境下长时间阻塞。
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
     print("加载 CLAP 模型...", end=" ", flush=True)
-    model = laion_clap.CLAP_Module(enable_fusion=False)
-    model.load_ckpt()  # 自动下载预训练权重
+    try:
+        # 抑制第三方库加载日志，避免刷屏。
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            model = laion_clap.CLAP_Module(enable_fusion=False)
+            model.load_ckpt()  # 自动下载预训练权重
+    except Exception as exc:
+        _model_load_error = exc
+        print("失败")
+        raise
     print("完成")
 
     # 预计算文本嵌入（只算一次）
     print("计算标签嵌入...", end=" ", flush=True)
-    text_embeddings = model.get_text_embedding(LABEL_PROMPTS, use_tensor=True)
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        text_embeddings = model.get_text_embedding(LABEL_PROMPTS, use_tensor=True)
     # 归一化
     text_embeddings = text_embeddings / text_embeddings.norm(dim=-1, keepdim=True)
     print("完成")
@@ -819,13 +869,15 @@ def classify(audio_path: str, top_k: int = 3) -> list[dict]:
         ]
 
     except Exception as e:
+        if _is_cuda_oom_error(e):
+            _release_cuda_memory()
         return [{"label": "unknown", "score": 0.0, "error": str(e)}]
 
 
 def batch_classify(
     file_list: list[str],
     top_k: int = 3,
-    batch_size: int = 32,
+    batch_size: int = 8,
     checkpoint_path: str | None = None,
     existing_results: dict | None = None,
 ) -> dict:
@@ -835,7 +887,7 @@ def batch_classify(
     checkpoint_path : 中间断点保存路径（每 500 个写一次）。
     existing_results: 已有结果，断点保存时合并进去，防止历史数据丢失。
     """
-    import json, os
+    import json
 
     if batch_size <= 0:
         raise ValueError("batch_size must be > 0")
@@ -847,6 +899,9 @@ def batch_classify(
             "labels": labels,
             "path": path,
         }
+
+    def build_unknown_labels(error: str) -> list[dict]:
+        return [{"label": "unknown", "score": 0.0, "error": error}]
 
     def save_checkpoint(incremental_results: dict) -> None:
         if not checkpoint_path:
@@ -865,12 +920,15 @@ def batch_classify(
         os.replace(tmp_path, checkpoint_path)
         print(f"  [断点已保存 → {checkpoint_path}]")
 
+    mode = "batch"
+    load_error = ""
+
     try:
         model, text_emb = _load_model()
-        use_batch = True
     except Exception as e:
-        print(f"  [CLAP 模型加载失败，降级逐文件模式] {e}")
-        use_batch = False
+        print(f"  [CLAP 模型加载失败，降级为 unknown] {e}")
+        mode = "unknown"
+        load_error = str(e)
 
     results = {}
     total = len(file_list)
@@ -880,7 +938,7 @@ def batch_classify(
         batch_paths = file_list[batch_start : batch_start + batch_size]
         batch_filenames = [Path(p).name for p in batch_paths]
 
-        if use_batch:
+        if mode == "batch":
             try:
                 audio_embs = model.get_audio_embedding_from_filelist(
                     x=batch_paths, use_tensor=True
@@ -899,13 +957,22 @@ def batch_classify(
                     ]
                     results[filename] = build_result(path, labels)
             except Exception as e:
-                print(f"  [批次错误，逐文件回退] {e}")
+                if _is_cuda_oom_error(e):
+                    _release_cuda_memory()
+                    mode = "single"
+                    print("  [批次 OOM，后续切换逐文件模式]", flush=True)
+                else:
+                    print(f"  [批次错误，逐文件回退] {e}")
                 for filename, path in zip(batch_filenames, batch_paths):
                     labels = classify(path, top_k)
                     results[filename] = build_result(path, labels)
-        else:
+        elif mode == "single":
             for filename, path in zip(batch_filenames, batch_paths):
                 labels = classify(path, top_k)
+                results[filename] = build_result(path, labels)
+        else:
+            for filename, path in zip(batch_filenames, batch_paths):
+                labels = build_unknown_labels(load_error)
                 results[filename] = build_result(path, labels)
 
         done = min(batch_start + batch_size, total)

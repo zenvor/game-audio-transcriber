@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import json
 import time
+import gc
 from pathlib import Path
 
 import config
@@ -36,6 +37,23 @@ def save_results(results: dict, output_path: str):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
+
+
+def release_cuda_memory(tag: str):
+    """主动释放 PyTorch CUDA cache，降低 Whisper->CLAP 串行阶段的显存压力。"""
+    gc.collect()
+    try:
+        import torch
+    except Exception:
+        return
+    if not torch.cuda.is_available():
+        return
+    try:
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+        print(f"[显存回收] {tag}")
+    except Exception:
+        pass
 
 
 def has_speech_result(result: dict) -> bool:
@@ -251,6 +269,10 @@ def run(input_dir: str, output_dir: str, device: str | None = None):
 
     # 5. 保存人声转写结果
     save_results(speech_results, output_path)
+
+    # 进入 CLAP 前主动释放 Whisper 占用资源，避免同进程串行阶段显存挤占。
+    del transcriber
+    release_cuda_memory("Whisper 阶段结束，准备 CLAP")
 
     # 6. 对纯音效文件进行 CLAP 分类
     if sfx_candidates:
