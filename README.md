@@ -55,6 +55,8 @@ scripts/export_audio_index.py
 
 利用 Whisper 返回的 `no_speech_prob`（无人声概率）自动区分语音和音效，无需额外的 VAD 模型。
 
+对短音频，脚本会使用双阈值做更保守的人声判断：如果 `no_speech_prob` 略高，但 Whisper 仍转出了非空文本，仍会优先视为人声，减少短语音被误分到 `sfx_results.json` 的情况。
+
 ## 安装
 
 ### Mac M 系列（Apple Silicon）
@@ -139,7 +141,16 @@ python main.py [OPTIONS]
   --device STR      运行设备：cuda / cpu（默认自动检测）
   --model NAME      覆盖 Whisper 模型（默认 large-v3-turbo / large-v3）
   --sfx-only        仅重新分类音效，跳过 Whisper 转写
+  --recheck-sfx     重新检查已有 sfx_results.json，把误分流的人声迁回 results.json
 ```
+
+如果历史结果里已有一批短语音被误分到 `output/sfx_results.json`，可以单独执行：
+
+```bash
+python main.py --recheck-sfx
+```
+
+这个模式会重新转写 `sfx_results.json` 里的文件，并用当前双阈值规则判断是否应迁回 `results.json`；它不会重新跑 CLAP 分类，也不会扫描 `input/` 中的新文件。
 
 ### 语音纠错
 
@@ -151,7 +162,8 @@ python3 scripts/review_voice_texts.py [OPTIONS]
   --model NAME      模型名称，默认使用 provider 预设
   --force           即使已有结果也重新处理
   --limit N         只处理前 N 条，便于验证
-  --dry-run         只预览候选短语和待处理样本，不调用 API
+  --context-window N 每侧附带的相邻上下文条数（默认 2）
+  --dry-run         只预览候选短语、相邻上下文和待处理样本，不调用 API
 
 高级选项（一般不需要改）：--base-url, --api-key-env, --manual-phrases,
   --min-frequency, --candidate-limit, --save-every, --max-retries, --retry-backoff
@@ -240,6 +252,7 @@ output/
 - `gemini`：使用 Gemini 原生 `generateContent` 接口
 - `openai`：使用 OpenAI Chat Completions 接口
 - 请求失败时自动有限次重试，避免瞬时网络抖动或限流导致大量条目直接标记为错误
+- 模型会优先结合《王者荣耀》语境、同目录相邻条目和文本本身是否读起来合理来判断，不要求必须命中候选短语
 
 先做 dry-run，查看候选短语和待处理样本：
 
@@ -271,7 +284,10 @@ python3 scripts/review_voice_texts.py --provider openai
 
 - 读取 `output/results.json`
 - 合并 `data/honor_of_kings_phrases.txt` 和现有结果中的高频短语
-- 把王者荣耀语境和候选短语一起发给所选模型
+- 为每条记录补充同目录优先的前后文；不足时再回退到结果文件中的相邻条目
+- 把《王者荣耀》语境、相邻上下文、候选短语和当前文本一起发给所选模型
+- 根据语句是否自然、是否符合游戏固定播报来判断错别字、同音字和近音词误识别
+- 本地护栏会拦截误删阵营前缀、核心播报片段的缩句式修正，但允许删除重复噪声，如 `Defeat defeat → Defeat`
 - 将建议写回到 `corrected_text`
 
 脚本不会覆盖原始 `text`，而是新增以下字段：

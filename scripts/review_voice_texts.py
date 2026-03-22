@@ -6,30 +6,36 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from collections import Counter
 from difflib import SequenceMatcher
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib import error, request
 
 
 SYSTEM_PROMPT = """你是游戏本地化与语音资产整理助手。
 
-现在需要你校正《王者荣耀》语音备注文本。输入文本来自 ASR 语音识别，可能出现错听、近音字、同音词、标点缺失、英文播报拼写错误等问题。
+现在需要你校正《王者荣耀》语音备注文本。当前处理的语音包、音频文件、目录命名和播报内容都与《王者荣耀》相关。输入文本由 Whisper large-v3 转写得到。Whisper large-v3 的常见问题不是凭空编造整句，而是把发音相近的字词、近音词、同音词、英文单词或短语识别错，也可能出现轻微标点偏差。
 
 规则：
 1. 输出必须是 JSON 对象，字段固定为 corrected_text、changed、reason、kind、needs_manual_review。
 2. corrected_text 必须是适合做语音资源备注的短文本，不要扩写剧情，不要添加解释。
-3. 优先依据《王者荣耀》常见播报、战场信号、术语和候选短语进行修正。
+3. 优先结合《王者荣耀》常见播报、战场信号、术语、文件上下文和相邻条目进行修正，候选短语只是辅助参考，不是必须命中才能修正。
 4. 如果原文已经基本正确，保留原意并尽量少改。
 5. 如果无法确定，不要强行脑补，尽量保守修正。
 6. 英文播报保持常见游戏播报写法；中文播报保持自然、简洁、符合游戏语境。
 7. 不要无故删减信息。像 "Blue Team Rampage" 这类包含阵营信息的完整播报，除非确定有错，否则不能简化成 "Rampage!"。
-8. 如果 changed=false，则 corrected_text 应与原文保持一致或只做极轻微标点修复。
-9. kind 只能取以下枚举之一：asr_error、punctuation、normalization、uncertain、no_change。
-10. needs_manual_review 只在你无法高置信判断，或认为仍需人工过目时设为 true。
-11. reason 必须使用简体中文，禁止输出英文解释。
+8. 默认假设 ASR 错误主要表现为错字、错词、近音词替换，而不是凭空多出或少掉整段内容。除非你有非常强的上下文证据，否则不要删除阵营前缀、核心播报片段或完整短语。
+9. 像 "Blue Team, Killing Spree." 这类文本，不能只因为候选短语里有 "Killing Spree!" 就擅自删掉 "Blue Team"；遇到这种情况应保留原文或标记人工复核。
+10. 如果 changed=false，则 corrected_text 应与原文保持一致或只做极轻微标点修复。
+11. kind 只能取以下枚举之一：asr_error、punctuation、normalization、uncertain、no_change。
+12. needs_manual_review 只在你无法高置信判断，或认为仍需人工过目时设为 true。
+13. reason 必须使用简体中文，禁止输出英文解释。
+14. 要判断当前文本读起来是否自然、是否符合《王者荣耀》语境。如果识别结果像“小心对方偷他”这样读起来不合理，应优先考虑同音字、近音词或固定播报误识别，并修正为更合理的表达，例如“小心对方偷塔”。
+15. 如果提供了前文和后文，要优先利用这些相邻条目判断当前播报是否连贯、是否属于固定播报链。
+16. 判断时要优先考虑这是对“同一句口令/播报”的纠错：结合上下文、单词拼写、固定术语和整句是否通顺，判断当前文本里是否存在错别字或错误单词，而不是改写成另一句意思更短的播报。
 """
 
 PROVIDER_PRESETS = {
@@ -46,6 +52,9 @@ PROVIDER_PRESETS = {
         "api_style": "openai",
     },
 }
+
+NATURAL_CHUNK_PATTERN = re.compile(r"(\d+)")
+TOKEN_PATTERN = re.compile(r"[A-Za-z0-9']+|[\u4e00-\u9fff]")
 
 
 class RequestFailure(RuntimeError):
@@ -66,6 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None, help="只处理前 N 条，便于验证")
     parser.add_argument("--min-frequency", type=int, default=2, help="自动抽取候选短语的最小频次")
     parser.add_argument("--candidate-limit", type=int, default=20, help="每条记录附带的候选短语数量")
+    parser.add_argument("--context-window", type=int, default=2, help="每侧附带的相邻上下文条数")
     parser.add_argument("--save-every", type=int, default=10, help="每处理 N 条写回一次结果")
     parser.add_argument("--max-retries", type=int, default=3, help="单条请求最大重试次数")
     parser.add_argument("--retry-backoff", type=float, default=1.0, help="重试基础退避秒数")
@@ -147,9 +157,97 @@ def select_candidate_phrases(text: str, phrases: list[str], limit: int) -> list[
         reverse=True,
     )
     selected = [phrase for score, phrase in scored if score > 0.15][:limit]
-    if selected:
-        return selected
-    return phrases[:limit]
+    # 有意不兜底：无相关候选时返回空列表，配合 prompt 中"不要求必须命中候选短语"的指令，
+    # 让模型独立判断而非被无关短语误导。
+    return selected
+
+
+def normalize_context_path(raw_path: str, fallback_name: str) -> PurePosixPath:
+    normalized = raw_path.replace("\\", "/").strip()
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    if not normalized:
+        normalized = fallback_name
+    return PurePosixPath(normalized)
+
+
+def natural_sort_key(text: str) -> list[object]:
+    parts = NATURAL_CHUNK_PATTERN.split(text.lower())
+    return [int(part) if part.isdigit() else part for part in parts]
+
+
+def entry_sort_key(filename: str, meta: dict) -> tuple[object, ...]:
+    relative_path = normalize_context_path(str(meta.get("path", "")), filename)
+    return (
+        tuple(natural_sort_key(part) for part in relative_path.parent.parts),
+        natural_sort_key(relative_path.name),
+    )
+
+
+def format_context_entry(filename: str, meta: dict) -> str:
+    text = normalize_phrase(str(meta.get("text", ""))) or "（空）"
+    relative_path = normalize_context_path(str(meta.get("path", "")), filename)
+    return f"{relative_path.as_posix()} | {text}"
+
+
+def build_neighbor_context(
+    results: dict,
+    context_window: int,
+) -> dict[str, dict[str, list[str]]]:
+    entries = list(results.items())
+    contexts: dict[str, dict[str, list[str]]] = {
+        filename: {"previous": [], "next": []}
+        for filename, _ in entries
+    }
+    if context_window <= 0:
+        return contexts
+
+    grouped: dict[str, list[tuple[str, dict]]] = {}
+    for filename, meta in entries:
+        relative_path = normalize_context_path(str(meta.get("path", "")), filename)
+        grouped.setdefault(relative_path.parent.as_posix(), []).append((filename, meta))
+
+    for group_entries in grouped.values():
+        ordered_group = sorted(group_entries, key=lambda item: entry_sort_key(item[0], item[1]))
+        for index, (filename, _) in enumerate(ordered_group):
+            previous_slice = ordered_group[max(0, index - context_window):index]
+            next_slice = ordered_group[index + 1:index + 1 + context_window]
+            contexts[filename]["previous"] = [
+                format_context_entry(prev_filename, prev_meta)
+                for prev_filename, prev_meta in previous_slice
+            ]
+            contexts[filename]["next"] = [
+                format_context_entry(next_filename, next_meta)
+                for next_filename, next_meta in next_slice
+            ]
+
+    # 回退补充：同目录邻居不足时，按 results dict 的插入顺序取相邻条目。
+    # 前提：results.json 通常按目录/文件名有序写入；若顺序混乱，回退上下文
+    # 可能语义不连续，但不影响正确性，只是参考价值降低。
+    for index, (filename, _) in enumerate(entries):
+        previous_items = contexts[filename]["previous"]
+        next_items = contexts[filename]["next"]
+        if len(previous_items) < context_window:
+            start = max(0, index - context_window)
+            for prev_filename, prev_meta in entries[start:index]:
+                candidate = format_context_entry(prev_filename, prev_meta)
+                if candidate not in previous_items:
+                    previous_items.append(candidate)
+                if len(previous_items) >= context_window:
+                    break
+        if len(next_items) < context_window:
+            for next_filename, next_meta in entries[index + 1:index + 1 + context_window]:
+                candidate = format_context_entry(next_filename, next_meta)
+                if candidate not in next_items:
+                    next_items.append(candidate)
+                if len(next_items) >= context_window:
+                    break
+
+    for filename in contexts:
+        contexts[filename]["previous"] = contexts[filename]["previous"][-context_window:]
+        contexts[filename]["next"] = contexts[filename]["next"][:context_window]
+
+    return contexts
 
 
 def should_skip(meta: dict, force: bool) -> bool:
@@ -163,16 +261,33 @@ def should_skip(meta: dict, force: bool) -> bool:
     )
 
 
-def build_messages(text: str, lang: str, path: str, candidates: list[str]) -> list[dict]:
+def build_messages(
+    text: str,
+    lang: str,
+    path: str,
+    candidates: list[str],
+    previous_context: list[str],
+    next_context: list[str],
+) -> list[dict]:
     candidate_block = "\n".join(f"- {item}" for item in candidates) if candidates else "- 无"
+    previous_block = "\n".join(f"- {item}" for item in previous_context) if previous_context else "- 无"
+    next_block = "\n".join(f"- {item}" for item in next_context) if next_context else "- 无"
     user_prompt = f"""请校正下面这条《王者荣耀》语音备注文本。
 
 语言: {lang or 'unknown'}
 文件路径: {path}
 当前识别文本: {text}
 
+前文:
+{previous_block}
+
+后文:
+{next_block}
+
 候选短语:
 {candidate_block}
+
+请优先根据《王者荣耀》语境、相邻条目之间的连续关系，以及这句话本身读起来是否自然来判断。即使没有命中候选短语，也要独立判断当前识别文本是否合理；如果像错别字、同音字、近音词或固定播报误识别，应主动修正。
 
 请输出 JSON：
 {{
@@ -372,6 +487,82 @@ def contains_cjk(text: str) -> bool:
     return any("\u4e00" <= ch <= "\u9fff" for ch in text)
 
 
+def extract_core_tokens(text: str) -> list[str]:
+    return TOKEN_PATTERN.findall(normalize_phrase(text).lower())
+
+
+def deleted_block_matches_neighbor(
+    source_tokens: list[str],
+    start: int,
+    end: int,
+) -> bool:
+    deleted = source_tokens[start:end]
+    if not deleted:
+        return False
+    block_size = len(deleted)
+    previous_block = source_tokens[max(0, start - block_size):start]
+    next_block = source_tokens[end:end + block_size]
+    return deleted == previous_block or deleted == next_block
+
+
+def is_benign_repeated_block_cleanup(original: str, corrected: str) -> bool:
+    original_tokens = extract_core_tokens(original)
+    corrected_tokens = extract_core_tokens(corrected)
+    if not original_tokens or not corrected_tokens or len(corrected_tokens) >= len(original_tokens):
+        return False
+
+    matcher = SequenceMatcher(None, original_tokens, corrected_tokens)
+    saw_delete = False
+    for tag, i1, i2, _j1, _j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag != "delete" or not deleted_block_matches_neighbor(original_tokens, i1, i2):
+            return False
+        saw_delete = True
+    return saw_delete
+
+
+def is_strict_subsequence(candidate: list[str], source: list[str]) -> bool:
+    if not candidate or len(candidate) >= len(source):
+        return False
+    source_index = 0
+    for token in candidate:
+        while source_index < len(source) and source[source_index] != token:
+            source_index += 1
+        if source_index >= len(source):
+            return False
+        source_index += 1
+    return True
+
+
+def is_suspicious_shortening(original: str, corrected: str) -> bool:
+    if not original or not corrected or original == corrected:
+        return False
+    if punctuation_signature(original) == punctuation_signature(corrected):
+        return False
+    if normalization_signature(original) == normalization_signature(corrected):
+        return False
+    if is_benign_repeated_block_cleanup(original, corrected):
+        return False
+
+    original_tokens = extract_core_tokens(original)
+    corrected_tokens = extract_core_tokens(corrected)
+    if corrected_tokens and is_strict_subsequence(corrected_tokens, original_tokens):
+        return True
+
+    original_core = punctuation_signature(original).replace(" ", "").lower()
+    corrected_core = punctuation_signature(corrected).replace(" ", "").lower()
+    if (
+        corrected_core
+        and original_core
+        and corrected_core in original_core
+        and len(corrected_core) < len(original_core)
+    ):
+        return True
+
+    return False
+
+
 def fallback_reason_in_chinese(
     original: str,
     corrected: str,
@@ -390,6 +581,22 @@ def fallback_reason_in_chinese(
     if changed:
         return "已按游戏语境对原文做保守修正。"
     return "原文识别结果符合游戏语境，无需修改。"
+
+
+def apply_conservative_guardrails(
+    original: str,
+    corrected: str,
+    needs_manual_review: bool,
+    reason: str,
+) -> tuple[str, bool, str]:
+    if not is_suspicious_shortening(original, corrected):
+        return corrected, needs_manual_review, reason
+
+    guardrail_reason = (
+        f"模型给出的修正“{corrected}”存在缩句式删减，可能误删原文有效信息；"
+        "已保留原文并标记为人工复核。"
+    )
+    return original, True, guardrail_reason
 
 
 def resolve_correction_changed(original: str, corrected: str) -> bool:
@@ -424,9 +631,9 @@ def backfill_structured_review_fields(meta: dict) -> bool:
 def apply_review(meta: dict, review: dict, model: str) -> None:
     original = normalize_phrase(str(meta.get("text", "")))
     corrected = normalize_phrase(str(review.get("corrected_text", ""))) or original
-    changed = resolve_correction_changed(original, corrected)
     requested_kind = normalize_correction_kind(review.get("kind"))
-    if not changed:
+    initial_changed = resolve_correction_changed(original, corrected)
+    if not initial_changed:
         correction_kind = "no_change"
     elif requested_kind and requested_kind != "no_change":
         correction_kind = requested_kind
@@ -434,7 +641,7 @@ def apply_review(meta: dict, review: dict, model: str) -> None:
         correction_kind = infer_correction_kind(
             original=original,
             corrected=corrected,
-            changed=changed,
+            changed=initial_changed,
         )
     needs_manual_review = normalize_manual_review(
         review.get("needs_manual_review"),
@@ -444,10 +651,19 @@ def apply_review(meta: dict, review: dict, model: str) -> None:
     reason = raw_reason if contains_cjk(raw_reason) else fallback_reason_in_chinese(
         original=original,
         corrected=corrected,
-        changed=changed,
+        changed=initial_changed,
         correction_kind=correction_kind,
         needs_manual_review=needs_manual_review,
     )
+    corrected, needs_manual_review, reason = apply_conservative_guardrails(
+        original=original,
+        corrected=corrected,
+        needs_manual_review=needs_manual_review,
+        reason=reason,
+    )
+    changed = resolve_correction_changed(original, corrected)
+    if not changed:
+        correction_kind = "no_change"
 
     meta["corrected_text"] = corrected
     meta["correction_changed"] = changed
@@ -462,6 +678,33 @@ def mark_error(meta: dict, model: str, message: str) -> None:
     meta["correction_status"] = "error"
     meta["correction_reason"] = message
     meta["correction_model"] = model
+
+
+def print_review_log(index: int, total: int, filename: str, meta: dict) -> None:
+    original = normalize_phrase(str(meta.get("text", ""))) or "（空）"
+    corrected = normalize_phrase(str(meta.get("corrected_text", ""))) or original
+    correction_kind = str(meta.get("correction_kind") or "unknown")
+    needs_manual_review = bool(meta.get("needs_manual_review"))
+    correction_reason = normalize_phrase(str(meta.get("correction_reason", ""))) or "（无）"
+    path = str(meta.get("path", "")).replace("\\", "/") or filename
+
+    print(f"[{index}/{total}] {filename}")
+    print(f"  path: {path}")
+    print(f"  原文: {original}")
+    print(f"  改后: {corrected}")
+    print(f"  类型: {correction_kind}")
+    print(f"  人工复核: {'是' if needs_manual_review else '否'}")
+    print(f"  理由: {correction_reason}")
+
+
+def print_error_log(index: int, total: int, filename: str, meta: dict, message: str) -> None:
+    original = normalize_phrase(str(meta.get("text", ""))) or "（空）"
+    path = str(meta.get("path", "")).replace("\\", "/") or filename
+
+    print(f"[{index}/{total}] {filename} -> 错误", file=sys.stderr)
+    print(f"  path: {path}", file=sys.stderr)
+    print(f"  原文: {original}", file=sys.stderr)
+    print(f"  原因: {message}", file=sys.stderr)
 
 
 def prepare_review_queue(
@@ -497,17 +740,28 @@ def main() -> int:
 
     results = load_json(input_path)
     phrases = merge_phrase_candidates(results, manual_phrases_path, args.min_frequency)
+    contexts = build_neighbor_context(results, max(0, args.context_window))
     queue, dirty = prepare_review_queue(results, args.force, args.limit)
 
     print(f"待纠错条目: {len(queue)}")
     print(f"候选短语总数: {len(phrases)}")
+    print(f"上下文窗口: {max(0, args.context_window)}")
     print(f"提供商: {args.provider} | 模型: {model}")
 
     if args.dry_run:
         for filename, meta in queue[:5]:
             text = normalize_phrase(str(meta.get('text', '')))
             candidates = select_candidate_phrases(text, phrases, args.candidate_limit)
+            context = contexts.get(filename, {"previous": [], "next": []})
             print(f"\n[{filename}] {text}")
+            if context["previous"]:
+                print("  前文:")
+                for item in context["previous"]:
+                    print(f"    - {item}")
+            if context["next"]:
+                print("  后文:")
+                for item in context["next"]:
+                    print(f"    - {item}")
             for candidate in candidates[:8]:
                 print(f"  - {candidate}")
         print("\ndry-run 完成，未调用 API。")
@@ -523,24 +777,32 @@ def main() -> int:
         lang = str(meta.get("lang", ""))
         path = str(meta.get("path", ""))
         candidates = select_candidate_phrases(text, phrases, args.candidate_limit)
+        context = contexts.get(filename, {"previous": [], "next": []})
         try:
             review = call_provider_with_retries(
                 api_style=api_style,
                 base_url=base_url,
                 api_key=api_key,
                 model=model,
-                messages=build_messages(text=text, lang=lang, path=path, candidates=candidates),
+                messages=build_messages(
+                    text=text,
+                    lang=lang,
+                    path=path,
+                    candidates=candidates,
+                    previous_context=context["previous"],
+                    next_context=context["next"],
+                ),
                 max_retries=max(1, args.max_retries),
                 retry_backoff=max(0.0, args.retry_backoff),
             )
             apply_review(meta, review, model)
-            print(f"[{index}/{len(queue)}] {filename} -> {meta['corrected_text']}")
+            print_review_log(index, len(queue), filename, meta)
         except RequestFailure as exc:
             mark_error(meta, model, str(exc))
-            print(f"[{index}/{len(queue)}] {filename} -> 错误: {exc}", file=sys.stderr)
+            print_error_log(index, len(queue), filename, meta, str(exc))
         except Exception as exc:  # noqa: BLE001
             mark_error(meta, model, f"未预期异常: {exc}")
-            print(f"[{index}/{len(queue)}] {filename} -> 未预期异常: {exc}", file=sys.stderr)
+            print_error_log(index, len(queue), filename, meta, f"未预期异常: {exc}")
 
         dirty = True
         if dirty and args.save_every > 0 and index % args.save_every == 0:
