@@ -163,6 +163,7 @@ python3 scripts/review_voice_texts.py [OPTIONS]
   --force           即使已有结果也重新处理
   --limit N         只处理前 N 条，便于验证
   --context-window N 每侧附带的相邻上下文条数（默认 2）
+  --batch-size N    每批请求处理的条目数（默认 5；设为 1 表示单条模式）
   --dry-run         只预览候选短语、相邻上下文和待处理样本，不调用 API
 
 高级选项（一般不需要改）：--base-url, --api-key-env, --manual-phrases,
@@ -253,6 +254,7 @@ output/
 - `openai`：使用 OpenAI Chat Completions 接口
 - 请求失败时自动有限次重试，避免瞬时网络抖动或限流导致大量条目直接标记为错误
 - 模型会优先结合《王者荣耀》语境、同目录相邻条目和文本本身是否读起来合理来判断，不要求必须命中候选短语
+- 默认会把待纠错条目按 5 条一批发给模型；如果整批返回非 JSON、缺项、条数不符或文件名对不上，会自动拆回单条重试
 
 先做 dry-run，查看候选短语和待处理样本：
 
@@ -285,9 +287,10 @@ python3 scripts/review_voice_texts.py --provider openai
 - 读取 `output/results.json`
 - 合并 `data/honor_of_kings_phrases.txt` 和现有结果中的高频短语
 - 为每条记录补充同目录优先的前后文；不足时再回退到结果文件中的相邻条目
-- 把《王者荣耀》语境、相邻上下文、候选短语和当前文本一起发给所选模型
+- 把《王者荣耀》语境、相邻上下文、候选短语和当前文本按批次一起发给所选模型
 - 根据语句是否自然、是否符合游戏固定播报来判断错别字、同音字和近音词误识别
 - 本地护栏会拦截误删阵营前缀、核心播报片段的缩句式修正，但允许删除重复噪声，如 `Defeat defeat → Defeat`
+- 整批返回结构异常时自动拆回单条重试；`--batch-size 1` 可显式关闭批量模式
 - 将建议写回到 `corrected_text`
 
 脚本不会覆盖原始 `text`，而是新增以下字段：

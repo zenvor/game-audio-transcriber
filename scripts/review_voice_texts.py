@@ -12,6 +12,7 @@ import time
 from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path, PurePosixPath
+from typing import Callable
 from urllib import error, request
 
 
@@ -76,6 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-frequency", type=int, default=2, help="自动抽取候选短语的最小频次")
     parser.add_argument("--candidate-limit", type=int, default=20, help="每条记录附带的候选短语数量")
     parser.add_argument("--context-window", type=int, default=2, help="每侧附带的相邻上下文条数")
+    parser.add_argument("--batch-size", type=int, default=5, help="每批请求处理的条目数")
     parser.add_argument("--save-every", type=int, default=10, help="每处理 N 条写回一次结果")
     parser.add_argument("--max-retries", type=int, default=3, help="单条请求最大重试次数")
     parser.add_argument("--retry-backoff", type=float, default=1.0, help="重试基础退避秒数")
@@ -261,22 +263,42 @@ def should_skip(meta: dict, force: bool) -> bool:
     )
 
 
-def build_messages(
-    text: str,
-    lang: str,
-    path: str,
-    candidates: list[str],
-    previous_context: list[str],
-    next_context: list[str],
-) -> list[dict]:
-    candidate_block = "\n".join(f"- {item}" for item in candidates) if candidates else "- 无"
-    previous_block = "\n".join(f"- {item}" for item in previous_context) if previous_context else "- 无"
-    next_block = "\n".join(f"- {item}" for item in next_context) if next_context else "- 无"
-    user_prompt = f"""请校正下面这条《王者荣耀》语音备注文本。
+def build_request_item(
+    filename: str,
+    meta: dict,
+    phrases: list[str],
+    contexts: dict[str, dict[str, list[str]]],
+    candidate_limit: int,
+) -> dict:
+    text = normalize_phrase(str(meta.get("text", "")))
+    lang = str(meta.get("lang", ""))
+    path = str(meta.get("path", ""))
+    candidates = select_candidate_phrases(text, phrases, candidate_limit)
+    context = contexts.get(filename, {"previous": [], "next": []})
+    return {
+        "filename": filename,
+        "meta": meta,
+        "text": text,
+        "lang": lang,
+        "path": path,
+        "candidates": candidates,
+        "previous_context": context["previous"],
+        "next_context": context["next"],
+    }
 
-语言: {lang or 'unknown'}
-文件路径: {path}
-当前识别文本: {text}
+
+def build_messages(batch_items: list[dict]) -> list[dict]:
+    item_blocks: list[str] = []
+    for index, item in enumerate(batch_items, start=1):
+        candidate_block = "\n".join(f"- {candidate}" for candidate in item["candidates"]) if item["candidates"] else "- 无"
+        previous_block = "\n".join(f"- {entry}" for entry in item["previous_context"]) if item["previous_context"] else "- 无"
+        next_block = "\n".join(f"- {entry}" for entry in item["next_context"]) if item["next_context"] else "- 无"
+        item_blocks.append(
+            f"""### 条目 {index}
+filename: {item["filename"]}
+语言: {item["lang"] or 'unknown'}
+文件路径: {item["path"]}
+当前识别文本: {item["text"]}
 
 前文:
 {previous_block}
@@ -285,19 +307,35 @@ def build_messages(
 {next_block}
 
 候选短语:
-{candidate_block}
+{candidate_block}"""
+        )
 
-请优先根据《王者荣耀》语境、相邻条目之间的连续关系，以及这句话本身读起来是否自然来判断。即使没有命中候选短语，也要独立判断当前识别文本是否合理；如果像错别字、同音字、近音词或固定播报误识别，应主动修正。
+    joined_items = "\n\n".join(item_blocks)
+    user_prompt = f"""请批量校正下面这些《王者荣耀》语音备注文本。
 
-请输出 JSON：
+{joined_items}
+
+请优先根据《王者荣耀》语境、相邻条目之间的连续关系，以及每句话本身读起来是否自然来判断。即使没有命中候选短语，也要独立判断当前识别文本是否合理；如果像错别字、同音字、近音词或固定播报误识别，应主动修正。
+
+请严格输出 JSON 对象，顶层结构固定为：
 {{
-  "corrected_text": "校正后的文本",
-  "changed": true,
-  "reason": "使用简体中文简短说明为什么这么改",
-  "kind": "asr_error",
-  "needs_manual_review": false
+  "items": [
+    {{
+      "filename": "与输入完全一致的文件名",
+      "corrected_text": "校正后的文本",
+      "changed": true,
+      "reason": "使用简体中文简短说明为什么这么改",
+      "kind": "asr_error",
+      "needs_manual_review": false
+    }}
+  ]
 }}
-"""
+
+要求：
+1. items 数量必须与输入条目数量完全一致。
+2. 每个 filename 必须与输入完全一致，不得省略、重命名或合并条目。
+3. 可以调整 items 的顺序，但 filename 必须能唯一对应回输入。
+4. 不要输出额外解释，不要输出 Markdown，只输出 JSON。"""
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -413,6 +451,46 @@ def call_provider_with_retries(
                 raise
             time.sleep(retry_backoff * (2 ** (attempt - 1)))
     raise RequestFailure("请求失败且未返回结果", retryable=False)
+
+
+def parse_batch_reviews(payload: dict, expected_filenames: list[str]) -> dict[str, dict]:
+    if not isinstance(payload, dict):
+        raise RequestFailure(f"模型返回顶层不是对象: {payload!r}", retryable=False)
+
+    items = payload.get("items")
+    if not isinstance(items, list):
+        raise RequestFailure(f"模型返回缺少 items 数组: {payload!r}", retryable=False)
+    if len(items) != len(expected_filenames):
+        raise RequestFailure(
+            f"模型返回条目数不匹配: 期望 {len(expected_filenames)} 条，实际 {len(items)} 条",
+            retryable=False,
+        )
+
+    expected_set = set(expected_filenames)
+    seen: set[str] = set()
+    reviews_by_filename: dict[str, dict] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            raise RequestFailure(f"items 内存在非对象条目: {item!r}", retryable=False)
+        filename = item.get("filename")
+        if not isinstance(filename, str) or not filename:
+            raise RequestFailure(f"items 内存在缺失 filename 的条目: {item!r}", retryable=False)
+        if filename not in expected_set:
+            raise RequestFailure(f"模型返回了未知 filename: {filename}", retryable=False)
+        if filename in seen:
+            raise RequestFailure(f"模型返回了重复 filename: {filename}", retryable=False)
+        seen.add(filename)
+        reviews_by_filename[filename] = item
+
+    missing = [filename for filename in expected_filenames if filename not in seen]
+    if missing:
+        raise RequestFailure(f"模型缺少以下 filename: {', '.join(missing)}", retryable=False)
+    return reviews_by_filename
+
+
+def chunk_queue(queue: list[tuple[str, dict]], batch_size: int) -> list[list[tuple[str, dict]]]:
+    safe_batch_size = max(1, batch_size)
+    return [queue[index:index + safe_batch_size] for index in range(0, len(queue), safe_batch_size)]
 
 
 VALID_CORRECTION_KINDS = {
@@ -707,6 +785,120 @@ def print_error_log(index: int, total: int, filename: str, meta: dict, message: 
     print(f"  原因: {message}", file=sys.stderr)
 
 
+def print_batch_log(batch_index: int, batch_total: int, start: int, end: int, total: int) -> None:
+    print(f"\n批次 {batch_index}/{batch_total} | 处理 {start}-{end}/{total}")
+
+
+def print_batch_fallback_log(
+    batch_index: int,
+    batch_total: int,
+    start: int,
+    end: int,
+    total: int,
+    message: str,
+) -> None:
+    print(
+        f"\n批次 {batch_index}/{batch_total} | 处理 {start}-{end}/{total} -> 批量失败，拆单条重试",
+        file=sys.stderr,
+    )
+    print(f"  原因: {message}", file=sys.stderr)
+
+
+def process_single_review_item(
+    *,
+    filename: str,
+    meta: dict,
+    offset: int,
+    total: int,
+    model: str,
+    api_style: str,
+    base_url: str,
+    api_key: str,
+    phrases: list[str],
+    contexts: dict[str, dict[str, list[str]]],
+    candidate_limit: int,
+    max_retries: int,
+    retry_backoff: float,
+    on_progress: Callable[[], None] | None = None,
+) -> None:
+    single_request_item = build_request_item(
+        filename=filename,
+        meta=meta,
+        phrases=phrases,
+        contexts=contexts,
+        candidate_limit=candidate_limit,
+    )
+    try:
+        payload = call_provider_with_retries(
+            api_style=api_style,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            messages=build_messages([single_request_item]),
+            max_retries=max(1, max_retries),
+            retry_backoff=max(0.0, retry_backoff),
+        )
+        review = parse_batch_reviews(payload, [filename])[filename]
+        apply_review(meta, review, model)
+        print_review_log(offset, total, filename, meta)
+    except RequestFailure as single_exc:
+        mark_error(meta, model, str(single_exc))
+        print_error_log(offset, total, filename, meta, str(single_exc))
+    except Exception as single_exc:  # noqa: BLE001
+        mark_error(meta, model, f"未预期异常: {single_exc}")
+        print_error_log(offset, total, filename, meta, f"未预期异常: {single_exc}")
+    finally:
+        if on_progress is not None:
+            on_progress()
+
+
+def fallback_batch_to_single_retry(
+    *,
+    batch: list[tuple[str, dict]],
+    batch_index: int,
+    batch_total: int,
+    batch_start: int,
+    batch_end: int,
+    total: int,
+    message: str,
+    model: str,
+    api_style: str,
+    base_url: str,
+    api_key: str,
+    phrases: list[str],
+    contexts: dict[str, dict[str, list[str]]],
+    candidate_limit: int,
+    max_retries: int,
+    retry_backoff: float,
+    on_progress: Callable[[], None] | None = None,
+) -> None:
+    print_batch_fallback_log(
+        batch_index=batch_index,
+        batch_total=batch_total,
+        start=batch_start,
+        end=batch_end,
+        total=total,
+        message=message,
+    )
+    for offset, (filename, meta) in enumerate(batch, start=batch_start):
+        process_single_review_item(
+            filename=filename,
+            meta=meta,
+            offset=offset,
+            total=total,
+            model=model,
+            api_style=api_style,
+            base_url=base_url,
+            api_key=api_key,
+            phrases=phrases,
+            contexts=contexts,
+            candidate_limit=candidate_limit,
+            max_retries=max_retries,
+            retry_backoff=retry_backoff,
+            on_progress=on_progress,
+        )
+
+
 def prepare_review_queue(
     results: dict,
     force: bool,
@@ -742,27 +934,33 @@ def main() -> int:
     phrases = merge_phrase_candidates(results, manual_phrases_path, args.min_frequency)
     contexts = build_neighbor_context(results, max(0, args.context_window))
     queue, dirty = prepare_review_queue(results, args.force, args.limit)
+    batches = chunk_queue(queue, args.batch_size)
 
     print(f"待纠错条目: {len(queue)}")
     print(f"候选短语总数: {len(phrases)}")
     print(f"上下文窗口: {max(0, args.context_window)}")
+    print(f"批大小: {max(1, args.batch_size)}")
     print(f"提供商: {args.provider} | 模型: {model}")
 
     if args.dry_run:
         for filename, meta in queue[:5]:
-            text = normalize_phrase(str(meta.get('text', '')))
-            candidates = select_candidate_phrases(text, phrases, args.candidate_limit)
-            context = contexts.get(filename, {"previous": [], "next": []})
-            print(f"\n[{filename}] {text}")
-            if context["previous"]:
+            request_item = build_request_item(
+                filename=filename,
+                meta=meta,
+                phrases=phrases,
+                contexts=contexts,
+                candidate_limit=args.candidate_limit,
+            )
+            print(f"\n[{filename}] {request_item['text']}")
+            if request_item["previous_context"]:
                 print("  前文:")
-                for item in context["previous"]:
+                for item in request_item["previous_context"]:
                     print(f"    - {item}")
-            if context["next"]:
+            if request_item["next_context"]:
                 print("  后文:")
-                for item in context["next"]:
+                for item in request_item["next_context"]:
                     print(f"    - {item}")
-            for candidate in candidates[:8]:
+            for candidate in request_item["candidates"][:8]:
                 print(f"  - {candidate}")
         print("\ndry-run 完成，未调用 API。")
         return 0
@@ -772,42 +970,104 @@ def main() -> int:
         print(f"缺少 API key，请设置环境变量 {api_key_env}", file=sys.stderr)
         return 1
 
-    for index, (filename, meta) in enumerate(queue, start=1):
-        text = normalize_phrase(str(meta.get("text", "")))
-        lang = str(meta.get("lang", ""))
-        path = str(meta.get("path", ""))
-        candidates = select_candidate_phrases(text, phrases, args.candidate_limit)
-        context = contexts.get(filename, {"previous": [], "next": []})
+    processed_count = 0
+    pending_since_save = 0
+
+    def flush_if_needed() -> tuple[bool, int]:
+        nonlocal dirty, pending_since_save
+        if args.save_every > 0 and pending_since_save >= args.save_every:
+            save_json(input_path, results)
+            dirty = False
+            pending_since_save = 0
+        return dirty, pending_since_save
+
+    def mark_progress() -> tuple[bool, int, int]:
+        nonlocal dirty, processed_count, pending_since_save
+        dirty = True
+        processed_count += 1
+        pending_since_save += 1
+        flush_if_needed()
+        return dirty, processed_count, pending_since_save
+
+    for batch_index, batch in enumerate(batches, start=1):
+        batch_start = processed_count + 1
+        batch_end = processed_count + len(batch)
+        print_batch_log(batch_index, len(batches), batch_start, batch_end, len(queue))
+
+        batch_request_items = [
+            build_request_item(
+                filename=filename,
+                meta=meta,
+                phrases=phrases,
+                contexts=contexts,
+                candidate_limit=args.candidate_limit,
+            )
+            for filename, meta in batch
+        ]
+        expected_filenames = [item["filename"] for item in batch_request_items]
+
         try:
-            review = call_provider_with_retries(
+            payload = call_provider_with_retries(
                 api_style=api_style,
                 base_url=base_url,
                 api_key=api_key,
                 model=model,
-                messages=build_messages(
-                    text=text,
-                    lang=lang,
-                    path=path,
-                    candidates=candidates,
-                    previous_context=context["previous"],
-                    next_context=context["next"],
-                ),
+                messages=build_messages(batch_request_items),
                 max_retries=max(1, args.max_retries),
                 retry_backoff=max(0.0, args.retry_backoff),
             )
-            apply_review(meta, review, model)
-            print_review_log(index, len(queue), filename, meta)
-        except RequestFailure as exc:
-            mark_error(meta, model, str(exc))
-            print_error_log(index, len(queue), filename, meta, str(exc))
-        except Exception as exc:  # noqa: BLE001
-            mark_error(meta, model, f"未预期异常: {exc}")
-            print_error_log(index, len(queue), filename, meta, f"未预期异常: {exc}")
+            reviews_by_filename = parse_batch_reviews(payload, expected_filenames)
+            for offset, (filename, meta) in enumerate(batch, start=batch_start):
+                apply_review(meta, reviews_by_filename[filename], model)
+                print_review_log(offset, len(queue), filename, meta)
+                mark_progress()
+        except RequestFailure as batch_exc:
+            if len(batch) == 1:
+                filename, meta = batch[0]
+                mark_error(meta, model, str(batch_exc))
+                print_error_log(batch_start, len(queue), filename, meta, str(batch_exc))
+                mark_progress()
+                continue
 
-        dirty = True
-        if dirty and args.save_every > 0 and index % args.save_every == 0:
-            save_json(input_path, results)
-            dirty = False
+            fallback_batch_to_single_retry(
+                batch=batch,
+                batch_index=batch_index,
+                batch_total=len(batches),
+                batch_start=batch_start,
+                batch_end=batch_end,
+                total=len(queue),
+                message=str(batch_exc),
+                model=model,
+                api_style=api_style,
+                base_url=base_url,
+                api_key=api_key,
+                phrases=phrases,
+                contexts=contexts,
+                candidate_limit=args.candidate_limit,
+                max_retries=args.max_retries,
+                retry_backoff=args.retry_backoff,
+                on_progress=mark_progress,
+            )
+        except Exception as batch_exc:  # noqa: BLE001
+            fallback_batch_to_single_retry(
+                batch=batch,
+                batch_index=batch_index,
+                batch_total=len(batches),
+                batch_start=batch_start,
+                batch_end=batch_end,
+                total=len(queue),
+                message=f"未预期异常: {batch_exc}",
+                model=model,
+                api_style=api_style,
+                base_url=base_url,
+                api_key=api_key,
+                phrases=phrases,
+                contexts=contexts,
+                candidate_limit=args.candidate_limit,
+                max_retries=args.max_retries,
+                retry_backoff=args.retry_backoff,
+                on_progress=mark_progress,
+            )
 
     if dirty:
         save_json(input_path, results)
