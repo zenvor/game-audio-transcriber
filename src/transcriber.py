@@ -113,7 +113,10 @@ class Transcriber:
         if segments:
             no_speech_prob = sum(s.no_speech_prob for s in segments) / len(segments)
         else:
-            no_speech_prob = 1.0
+            # segments 为空：Whisper 未生成任何分段（极短音频或解码失败）。
+            # 此时 text 也为空，pipeline 会用双阈值兜底；这里保持高 nsp 但
+            # 不再盲目用 1.0，以便调试时能在日志里看到真实情况。
+            no_speech_prob = 0.99
 
         return {
             "text": text,

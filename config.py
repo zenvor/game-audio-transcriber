@@ -24,7 +24,11 @@ DEVICE       = "cpu"                # 运行时可通过 --device cuda 覆盖
 COMPUTE_TYPE = "float16"            # GPU: float16 / CPU: int8
 
 # ── 人声/音效分流阈值 ──────────────────────────────────
-NO_SPEECH_THRESHOLD = 0.6  # Whisper no_speech_prob 高于此值判定为纯音效
+NO_SPEECH_THRESHOLD = 0.6   # Whisper no_speech_prob 高于此值初步判定为纯音效
+# 若 Whisper 转写出了非空文本，即使 no_speech_prob 超过上面阈值，
+# 仍可能是人声（短音频填充 30s 窗口导致 nsp 偏高）；
+# 只有 no_speech_prob 超过此第二阈值才最终判为音效。
+NO_SPEECH_THRESHOLD_WITH_TEXT = 0.85
 
 # ── 转写配置 ──────────────────────────────────────────
 LANGUAGE       = None   # None = 自动检测中英文

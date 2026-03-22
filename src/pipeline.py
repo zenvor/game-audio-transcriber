@@ -38,6 +38,26 @@ def save_results(results: dict, output_path: str):
         json.dump(results, f, ensure_ascii=False, indent=2)
 
 
+def has_speech_result(result: dict) -> bool:
+    """根据双阈值判断结果是否应归为人声。"""
+    no_speech_prob = float(result["no_speech_prob"])
+    text = str(result.get("text", "")).strip()
+    return (
+        no_speech_prob < config.NO_SPEECH_THRESHOLD
+        or (text and no_speech_prob < config.NO_SPEECH_THRESHOLD_WITH_TEXT)
+    )
+
+
+def build_speech_result(path: str, result: dict) -> dict:
+    return {
+        "text": result["text"],
+        "lang": result["lang"],
+        "duration": result["duration"],
+        "no_speech_prob": result["no_speech_prob"],
+        "path": path,
+    }
+
+
 def run_sfx_only(output_dir: str):
     """仅对已有 sfx_results.json 中的音效文件重新跑 CLAP 分类"""
     start_time = time.time()
@@ -60,6 +80,79 @@ def run_sfx_only(output_dir: str):
     print(f"\n完成！重新分类 {len(sfx_results)} 个音效文件")
     print(f"总耗时: {elapsed/60:.1f} 分钟")
     print(f"结果: {sfx_out_path}")
+
+
+def recheck_sfx_results(output_dir: str, device: str | None = None):
+    """重新检查已有 sfx_results.json，把误分流的人声迁回 results.json。"""
+    start_time = time.time()
+    output_path = os.path.join(output_dir, config.OUTPUT_FILE)
+    sfx_out_path = os.path.join(output_dir, "sfx_results.json")
+
+    existing_sfx = load_existing(sfx_out_path)
+    if not existing_sfx:
+        print(f"未找到已有音效结果: {sfx_out_path}")
+        return
+
+    speech_results = load_existing(output_path)
+    updated_sfx = dict(existing_sfx)
+    transcriber = Transcriber(device=device)
+
+    migrated = 0
+    kept = 0
+    skipped = 0
+    failed = 0
+    total = len(existing_sfx)
+
+    print(f"从 sfx_results.json 读取到 {total} 个音效文件，开始重检是否误分流...")
+
+    for index, (filename, meta) in enumerate(existing_sfx.items(), start=1):
+        path = str(meta.get("path", "")).strip()
+        if not path:
+            skipped += 1
+            print(f"[{index}/{total}] {filename} | 跳过 | 缺少 path 字段")
+            continue
+        if not os.path.exists(path):
+            skipped += 1
+            print(f"[{index}/{total}] {filename} | 跳过 | 文件不存在: {path}")
+            continue
+
+        try:
+            result = transcriber.transcribe(path)
+        except Exception as exc:
+            failed += 1
+            print(f"[{index}/{total}] {filename} | 错误 | {exc}")
+            continue
+
+        no_speech_prob = result["no_speech_prob"]
+        text = result["text"]
+        if has_speech_result(result):
+            speech_results[filename] = build_speech_result(path, result)
+            updated_sfx.pop(filename, None)
+            migrated += 1
+            tag = "迁回语音"
+        else:
+            kept += 1
+            tag = "保留音效"
+
+        print(
+            f"[{index}/{total}] {filename[:30]:<30} "
+            f"| {tag} | nsp={no_speech_prob:.2f} | {text[:30]}"
+        )
+
+    if migrated > 0:
+        save_results(speech_results, output_path)
+        save_results(updated_sfx, sfx_out_path)
+    else:
+        print("\n无需迁移，跳过写入。")
+
+    elapsed = time.time() - start_time
+    print(f"\n{'='*50}")
+    print(f"重检完成！迁回语音: {migrated} 个，保留音效: {kept} 个")
+    print(f"跳过: {skipped} 个，失败: {failed} 个")
+    print(f"results: {output_path}")
+    print(f"sfx_results: {sfx_out_path}")
+    print(f"总耗时: {elapsed/60:.1f} 分钟")
+    print(f"{'='*50}")
 
 
 def run(input_dir: str, output_dir: str, device: str | None = None):
@@ -103,16 +196,12 @@ def run(input_dir: str, output_dir: str, device: str | None = None):
         try:
             result = transcriber.transcribe(path)
             no_speech_prob = result["no_speech_prob"]
+            text = result["text"]
+            has_speech = has_speech_result(result)
 
-            if no_speech_prob < config.NO_SPEECH_THRESHOLD:
+            if has_speech:
                 # 有人声，保留转写结果
-                speech_results[filename] = {
-                    "text": result["text"],
-                    "lang": result["lang"],
-                    "duration": result["duration"],
-                    "no_speech_prob": no_speech_prob,
-                    "path": path,
-                }
+                speech_results[filename] = build_speech_result(path, result)
             else:
                 # 纯音效，收集待 CLAP 分类
                 sfx_candidates.append(path)
@@ -120,7 +209,7 @@ def run(input_dir: str, output_dir: str, device: str | None = None):
             elapsed = time.time() - start_time
             speed = (i + 1) / elapsed
             eta = (len(todo) - i - 1) / speed if speed > 0 else 0
-            tag = "语音" if no_speech_prob < config.NO_SPEECH_THRESHOLD else "音效"
+            tag = "语音" if has_speech else "音效"
             print(
                 f"[{i+1}/{len(todo)}] {filename[:30]:<30} "
                 f"| {tag} | nsp={no_speech_prob:.2f} | {result['text'][:30]} "
