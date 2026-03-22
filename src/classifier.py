@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import os
 import gc
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -17,10 +18,20 @@ import torch
 _model = None
 _text_embeddings = None
 _model_load_error: Exception | None = None
+_model_load_error_at: float | None = None
 
 
 def _is_env_flag_on(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_load_retry_after_seconds() -> int:
+    raw = os.getenv("CLAP_LOAD_RETRY_AFTER_SECONDS", "60").strip()
+    try:
+        value = int(float(raw))
+    except ValueError:
+        return 60
+    return max(value, 0)
 
 
 def _is_cuda_oom_error(exc: Exception) -> bool:
@@ -804,18 +815,28 @@ LABEL_NAMES = [name for _, name in LABELS]
 
 
 def _load_model():
-    global _model, _text_embeddings, _model_load_error
+    global _model, _text_embeddings, _model_load_error, _model_load_error_at
     if _model is not None:
         return _model, _text_embeddings
     if _model_load_error is not None:
-        raise RuntimeError(f"CLAP 模型不可用: {_model_load_error}") from _model_load_error
+        retry_after = _get_load_retry_after_seconds()
+        last_failed_at = _model_load_error_at or time.time()
+        elapsed = max(0.0, time.time() - last_failed_at)
+        if elapsed < retry_after:
+            remaining = max(0, int(retry_after - elapsed))
+            raise RuntimeError(
+                f"CLAP 模型不可用（冷却中，约 {remaining}s 后重试）: {_model_load_error}"
+            ) from _model_load_error
+        # 冷却窗口已过：允许在同一进程内再次尝试加载
+        _model_load_error = None
+        _model_load_error_at = None
 
     import laion_clap
 
     if _is_env_flag_on("CLAP_OFFLINE"):
         # 显式离线模式：仅使用本地缓存，避免 Windows 无网环境下长时间阻塞。
-        os.environ.setdefault("HF_HUB_OFFLINE", "1")
-        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
     print("加载 CLAP 模型...", end=" ", flush=True)
     try:
@@ -825,6 +846,7 @@ def _load_model():
             model.load_ckpt()  # 自动下载预训练权重
     except Exception as exc:
         _model_load_error = exc
+        _model_load_error_at = time.time()
         print("失败")
         raise
     print("完成")
