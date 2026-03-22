@@ -35,5 +35,8 @@ LANGUAGE       = None   # None = 自动检测中英文
 BEAM_SIZE      = 5
 VAD_FILTER     = False  # 已用 no_speech_prob 分流，无需内置 VAD
 
+# Silero VAD 预分流开关（True 时在 Whisper 之前先用 VAD 过滤纯音效）
+USE_VAD_PREFILTER = True
+
 # ── 日志 ─────────────────────────────────────────────
 LOG_INTERVAL = 50       # 每处理 N 个文件打印一次进度

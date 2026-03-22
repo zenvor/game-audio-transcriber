@@ -185,13 +185,38 @@ def run(input_dir: str, output_dir: str, device: str | None = None):
         print("所有文件已处理完毕！")
         return
 
-    # 3. 全量 Whisper 转写
+    # 3. Silero VAD 预分流（可通过 config.USE_VAD_PREFILTER 关闭）
+    sfx_candidates: list[str] = []
+    todo_whisper = todo
+
+    if config.USE_VAD_PREFILTER:
+        try:
+            from src.vad import SileroVAD
+            vad = SileroVAD()
+            todo_whisper = []
+            print(f"Silero VAD 预扫描 {len(todo)} 个文件...")
+            for j, path in enumerate(todo):
+                if vad.has_speech(path):
+                    todo_whisper.append(path)
+                else:
+                    sfx_candidates.append(path)
+                if (j + 1) % 200 == 0:
+                    print(f"  VAD 进度: {j+1}/{len(todo)}")
+            print(
+                f"VAD 完成：{len(todo_whisper)} 个待 Whisper，"
+                f"{len(sfx_candidates)} 个直接归音效\n"
+            )
+        except Exception as exc:
+            print(f"[VAD 初始化失败] {exc}，已回退：全量走 Whisper\n")
+            todo_whisper = todo
+            sfx_candidates = []
+
+    # 4. Whisper 转写（仅处理 VAD 认定含人声的文件）
     transcriber = Transcriber(device=device)
     speech_results = dict(existing_speech)
-    sfx_candidates = []
     failed = []
 
-    for i, path in enumerate(todo):
+    for i, path in enumerate(todo_whisper):
         filename = Path(path).name
         try:
             result = transcriber.transcribe(path)
@@ -208,10 +233,10 @@ def run(input_dir: str, output_dir: str, device: str | None = None):
 
             elapsed = time.time() - start_time
             speed = (i + 1) / elapsed
-            eta = (len(todo) - i - 1) / speed if speed > 0 else 0
+            eta = (len(todo_whisper) - i - 1) / speed if speed > 0 else 0
             tag = "语音" if has_speech else "音效"
             print(
-                f"[{i+1}/{len(todo)}] {filename[:30]:<30} "
+                f"[{i+1}/{len(todo_whisper)}] {filename[:30]:<30} "
                 f"| {tag} | nsp={no_speech_prob:.2f} | {result['text'][:30]} "
                 f"| {speed:.1f}/s | 剩余 {eta/60:.1f}min"
             )
@@ -224,10 +249,10 @@ def run(input_dir: str, output_dir: str, device: str | None = None):
             print(f"  [错误] {filename}: {e}", flush=True)
             failed.append({"path": path, "error": str(e)})
 
-    # 4. 保存人声转写结果
+    # 5. 保存人声转写结果
     save_results(speech_results, output_path)
 
-    # 5. 对纯音效文件进行 CLAP 分类
+    # 6. 对纯音效文件进行 CLAP 分类
     if sfx_candidates:
         print(f"\n音效文件 {len(sfx_candidates)} 个，开始 CLAP 分类...")
         from src.classifier import batch_classify
@@ -237,7 +262,7 @@ def run(input_dir: str, output_dir: str, device: str | None = None):
         save_results(sfx_results, sfx_out_path)
         print(f"音效分类结果已保存 → {sfx_out_path}")
 
-    # 6. 保存失败记录
+    # 7. 保存失败记录
     if failed:
         save_results(failed, failed_path)
 

@@ -3,6 +3,7 @@
 
 # Apple Silicon 优化的 Whisper
 mlx-whisper
+silero-vad
 
 # 音频处理
 ffmpeg-python

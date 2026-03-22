@@ -2,6 +2,7 @@
 # 注意：torch 需要从 PyTorch 官方 CUDA 源安装，不要直接 pip install torch
 # pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 faster-whisper
+silero-vad
 ffmpeg-python
 soundfile
 
