@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--target-root",
-        default="renamed_audio",
+        default="output/renamed_audio",
         help="分类重命名后的输出根目录",
     )
     parser.add_argument(
@@ -107,9 +107,10 @@ def iter_entries(json_path: Path) -> list[tuple[str, dict]]:
 
 
 def effective_text(meta: dict) -> tuple[str, str]:
-    corrected = (meta.get("corrected_text") or "").strip()
-    if corrected:
-        return corrected, "corrected_text"
+    if meta.get("correction_changed"):
+        corrected = (meta.get("corrected_text") or "").strip()
+        if corrected:
+            return corrected, "corrected_text"
     return (meta.get("text") or "").strip(), "text"
 
 
@@ -302,8 +303,12 @@ def main() -> int:
         print("\n存在冲突项，已停止执行。请先检查 rename_plan.json。")
         return 1
 
+    if target_root.exists():
+        shutil.rmtree(target_root)
+        print(f"\n已清空旧目录: {target_root}")
+
     copied, failures = apply_plan(plan)
-    print(f"\n已完成分类复制: {copied} 个文件")
+    print(f"已完成分类复制: {copied} 个文件")
     if failures:
         print(f"复制失败: {len(failures)} 个文件")
         for failure in failures[:10]:

@@ -178,7 +178,7 @@ python3 scripts/rename_audio_from_results.py [OPTIONS]
   --results FILE      语音结果文件路径（默认 output/results.json）
   --sfx-results FILE  音效结果文件路径（默认 output/sfx_results.json）
   --plan-out FILE     重命名计划输出路径（默认 output/rename_plan.json）
-  --target-root DIR   分类重命名输出根目录（默认 renamed_audio）
+  --target-root DIR   分类重命名输出根目录（默认 output/renamed_audio）
   --apply             实际执行复制重命名；默认只预览并导出计划
 ```
 
@@ -346,9 +346,9 @@ python3 scripts/rename_audio_from_results.py --apply
 
 脚本会：
 
-- 对语音结果优先使用 `corrected_text`，没有时回退到 `text`
+- 对语音结果，当 `correction_changed` 为 `true` 时使用 `corrected_text`，否则使用原始 `text`
 - 清洗非法文件名字符
-- 将文件复制到 `renamed_audio/` 下，按 `speech/` 和 `sfx/` 两大类分目录
+- 将文件复制到 `output/renamed_audio/` 下，按 `speech/` 和 `sfx/` 两大类分目录
 - 保留原子目录结构，例如 `System_Voice`、`UI`
 - 生成目标文件名：`标注文本__原始编号.wav`
 - 输出计划到 `output/rename_plan.json`
@@ -358,7 +358,7 @@ python3 scripts/rename_audio_from_results.py --apply
 ```
 input/System_Voice/Hector_Kill__01_8772748.wav
 →
-renamed_audio/speech/System_Voice/Hexakill__01_8772748.wav
+output/renamed_audio/speech/System_Voice/Hexakill__01_8772748.wav
 ```
 
 整理完成后，导出 CSV / JSON 索引，方便人工校对和资产交付：
