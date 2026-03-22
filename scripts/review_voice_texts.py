@@ -19,7 +19,7 @@ SYSTEM_PROMPT = """你是游戏本地化与语音资产整理助手。
 现在需要你校正《王者荣耀》语音备注文本。输入文本来自 ASR 语音识别，可能出现错听、近音字、同音词、标点缺失、英文播报拼写错误等问题。
 
 规则：
-1. 输出必须是 JSON 对象，字段固定为 corrected_text、changed、reason。
+1. 输出必须是 JSON 对象，字段固定为 corrected_text、changed、reason、kind、needs_manual_review。
 2. corrected_text 必须是适合做语音资源备注的短文本，不要扩写剧情，不要添加解释。
 3. 优先依据《王者荣耀》常见播报、战场信号、术语和候选短语进行修正。
 4. 如果原文已经基本正确，保留原意并尽量少改。
@@ -27,6 +27,9 @@ SYSTEM_PROMPT = """你是游戏本地化与语音资产整理助手。
 6. 英文播报保持常见游戏播报写法；中文播报保持自然、简洁、符合游戏语境。
 7. 不要无故删减信息。像 "Blue Team Rampage" 这类包含阵营信息的完整播报，除非确定有错，否则不能简化成 "Rampage!"。
 8. 如果 changed=false，则 corrected_text 应与原文保持一致或只做极轻微标点修复。
+9. kind 只能取以下枚举之一：asr_error、punctuation、normalization、uncertain、no_change。
+10. needs_manual_review 只在你无法高置信判断，或认为仍需人工过目时设为 true。
+11. reason 必须使用简体中文，禁止输出英文解释。
 """
 
 PROVIDER_PRESETS = {
@@ -152,7 +155,12 @@ def select_candidate_phrases(text: str, phrases: list[str], limit: int) -> list[
 def should_skip(meta: dict, force: bool) -> bool:
     if force:
         return False
-    return meta.get("correction_status") == "reviewed"
+    return (
+        meta.get("correction_status") == "reviewed"
+        and "correction_changed" in meta
+        and "correction_kind" in meta
+        and "needs_manual_review" in meta
+    )
 
 
 def build_messages(text: str, lang: str, path: str, candidates: list[str]) -> list[dict]:
@@ -170,7 +178,9 @@ def build_messages(text: str, lang: str, path: str, candidates: list[str]) -> li
 {{
   "corrected_text": "校正后的文本",
   "changed": true,
-  "reason": "简短说明为什么这么改"
+  "reason": "使用简体中文简短说明为什么这么改",
+  "kind": "asr_error",
+  "needs_manual_review": false
 }}
 """
     return [
@@ -290,12 +300,159 @@ def call_provider_with_retries(
     raise RequestFailure("请求失败且未返回结果", retryable=False)
 
 
+VALID_CORRECTION_KINDS = {
+    "asr_error",
+    "punctuation",
+    "normalization",
+    "uncertain",
+    "no_change",
+}
+
+KIND_ALIASES = {
+    "asr": "asr_error",
+    "asrerror": "asr_error",
+    "transcription_error": "asr_error",
+    "识别错误": "asr_error",
+    "asr识别错误": "asr_error",
+    "标点": "punctuation",
+    "标点修正": "punctuation",
+    "punctuation_fix": "punctuation",
+    "格式规范化": "normalization",
+    "规范化": "normalization",
+    "normalisation": "normalization",
+    "unclear": "uncertain",
+    "不确定": "uncertain",
+    "需人工复核": "uncertain",
+    "nochange": "no_change",
+    "不修改": "no_change",
+    "保持原文": "no_change",
+}
+
+PUNCTUATION_CHARS = " \t\r\n,.;:!?，。！？：；、'\"()[]{}<>-_/\\"
+
+
+def punctuation_signature(text: str) -> str:
+    return "".join(ch for ch in text if ch not in PUNCTUATION_CHARS)
+
+
+def normalization_signature(text: str) -> str:
+    return normalize_phrase(text).lower()
+
+
+def normalize_correction_kind(raw_kind: object) -> str | None:
+    if not raw_kind:
+        return None
+    normalized = normalize_phrase(str(raw_kind)).lower().replace(" ", "_")
+    normalized = KIND_ALIASES.get(normalized, normalized)
+    if normalized in VALID_CORRECTION_KINDS:
+        return normalized
+    return None
+
+
+def infer_correction_kind(original: str, corrected: str, changed: bool) -> str:
+    if not changed or original == corrected:
+        return "no_change"
+    if punctuation_signature(original) == punctuation_signature(corrected):
+        return "punctuation"
+    if normalization_signature(original) == normalization_signature(corrected):
+        return "normalization"
+    return "asr_error"
+
+
+def normalize_manual_review(raw_value: object, correction_kind: str) -> bool:
+    if isinstance(raw_value, bool):
+        return raw_value
+    if raw_value is None:
+        return correction_kind == "uncertain"
+    normalized = normalize_phrase(str(raw_value)).lower()
+    return normalized in {"1", "true", "yes", "y", "是", "需要", "需人工复核"}
+
+
+def contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+
+def fallback_reason_in_chinese(
+    original: str,
+    corrected: str,
+    changed: bool,
+    correction_kind: str,
+    needs_manual_review: bool,
+) -> str:
+    if needs_manual_review or correction_kind == "uncertain":
+        return "模型无法高置信判断，建议人工复核。"
+    if correction_kind == "asr_error":
+        return f"ASR 识别有误，已将“{original}”修正为更符合游戏语境的“{corrected}”。"
+    if correction_kind == "punctuation":
+        return "原文内容基本正确，仅做了标点或轻微格式修正。"
+    if correction_kind == "normalization":
+        return "原文语义不变，仅做了写法规范化处理。"
+    if changed:
+        return "已按游戏语境对原文做保守修正。"
+    return "原文识别结果符合游戏语境，无需修改。"
+
+
+def resolve_correction_changed(original: str, corrected: str) -> bool:
+    return original != corrected
+
+
+def backfill_structured_review_fields(meta: dict) -> bool:
+    if meta.get("correction_status") != "reviewed":
+        return False
+    if (
+        "correction_changed" in meta
+        and "correction_kind" in meta
+        and "needs_manual_review" in meta
+    ):
+        return False
+
+    original = normalize_phrase(str(meta.get("text", "")))
+    corrected = normalize_phrase(str(meta.get("corrected_text", ""))) or original
+    changed = resolve_correction_changed(original, corrected)
+    correction_kind = infer_correction_kind(
+        original=original,
+        corrected=corrected,
+        changed=changed,
+    )
+
+    meta["correction_changed"] = changed
+    meta["correction_kind"] = correction_kind
+    meta["needs_manual_review"] = correction_kind == "uncertain"
+    return True
+
+
 def apply_review(meta: dict, review: dict, model: str) -> None:
-    corrected = normalize_phrase(str(review.get("corrected_text", ""))) or normalize_phrase(str(meta.get("text", "")))
-    changed = bool(review.get("changed"))
-    reason = normalize_phrase(str(review.get("reason", ""))) or ("模型认为原文可保留" if not changed else "模型建议按游戏语境修正")
+    original = normalize_phrase(str(meta.get("text", "")))
+    corrected = normalize_phrase(str(review.get("corrected_text", ""))) or original
+    changed = resolve_correction_changed(original, corrected)
+    requested_kind = normalize_correction_kind(review.get("kind"))
+    if not changed:
+        correction_kind = "no_change"
+    elif requested_kind and requested_kind != "no_change":
+        correction_kind = requested_kind
+    else:
+        correction_kind = infer_correction_kind(
+            original=original,
+            corrected=corrected,
+            changed=changed,
+        )
+    needs_manual_review = normalize_manual_review(
+        review.get("needs_manual_review"),
+        correction_kind,
+    )
+    raw_reason = normalize_phrase(str(review.get("reason", "")))
+    reason = raw_reason if contains_cjk(raw_reason) else fallback_reason_in_chinese(
+        original=original,
+        corrected=corrected,
+        changed=changed,
+        correction_kind=correction_kind,
+        needs_manual_review=needs_manual_review,
+    )
 
     meta["corrected_text"] = corrected
+    meta["correction_changed"] = changed
+    meta["correction_kind"] = correction_kind
+    meta["needs_manual_review"] = needs_manual_review
     meta["correction_status"] = "reviewed"
     meta["correction_reason"] = reason
     meta["correction_model"] = model
@@ -315,6 +472,8 @@ def prepare_review_queue(
     queue: list[tuple[str, dict]] = []
     changed = False
     for filename, meta in results.items():
+        if backfill_structured_review_fields(meta):
+            changed = True
         text = normalize_phrase(str(meta.get("text", "")))
         if not text:
             meta["correction_status"] = "skipped"
