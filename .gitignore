@@ -7,6 +7,7 @@
 
 # Local assistant / tooling state
 .claude/
+tasks/
 
 # Python cache / build
 __pycache__/
