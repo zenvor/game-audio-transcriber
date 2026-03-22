@@ -256,7 +256,11 @@ def run(input_dir: str, output_dir: str, device: str | None = None):
     if sfx_candidates:
         print(f"\n音效文件 {len(sfx_candidates)} 个，开始 CLAP 分类...")
         from src.classifier import batch_classify
-        sfx_new = batch_classify(sfx_candidates)
+        sfx_new = batch_classify(
+            sfx_candidates,
+            checkpoint_path=sfx_out_path,
+            existing_results=existing_sfx,
+        )
         sfx_results = dict(existing_sfx)
         sfx_results.update(sfx_new)
         save_results(sfx_results, sfx_out_path)

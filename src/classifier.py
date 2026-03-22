@@ -822,26 +822,98 @@ def classify(audio_path: str, top_k: int = 3) -> list[dict]:
         return [{"label": "unknown", "score": 0.0, "error": str(e)}]
 
 
-def batch_classify(file_list: list[str], top_k: int = 3) -> dict:
+def batch_classify(
+    file_list: list[str],
+    top_k: int = 3,
+    batch_size: int = 32,
+    checkpoint_path: str | None = None,
+    existing_results: dict | None = None,
+) -> dict:
     """
-    批量分类，返回 {文件名: [分类结果]} 映射
+    批量分类，返回 {文件名: [分类结果]} 映射。
+    batch_size      : 每次送入 CLAP 的文件数。
+    checkpoint_path : 中间断点保存路径（每 500 个写一次）。
+    existing_results: 已有结果，断点保存时合并进去，防止历史数据丢失。
     """
-    results = {}
-    total = len(file_list)
-    print(f"\n音效分类中，共 {total} 个文件...")
+    import json, os
 
-    for i, path in enumerate(file_list):
-        filename = Path(path).name
-        labels = classify(path, top_k)
-        text = " / ".join(l["label"] for l in labels if l["label"] != "unknown")
-        results[filename] = {
-            "text": text,
+    if batch_size <= 0:
+        raise ValueError("batch_size must be > 0")
+
+    def build_result(path: str, labels: list[dict]) -> dict:
+        return {
+            "text": " / ".join(l["label"] for l in labels if l["label"] != "unknown"),
             "type": "sfx",
             "labels": labels,
-            "path": path
+            "path": path,
         }
-        if (i + 1) % 100 == 0:
-            print(f"  进度: {i+1}/{total}")
+
+    def save_checkpoint(incremental_results: dict) -> None:
+        if not checkpoint_path:
+            return
+
+        checkpoint_dir = os.path.dirname(checkpoint_path)
+        if checkpoint_dir:
+            os.makedirs(checkpoint_dir, exist_ok=True)
+
+        merged = dict(existing_results or {})
+        merged.update(incremental_results)
+
+        tmp_path = f"{checkpoint_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, checkpoint_path)
+        print(f"  [断点已保存 → {checkpoint_path}]")
+
+    try:
+        model, text_emb = _load_model()
+        use_batch = True
+    except Exception as e:
+        print(f"  [CLAP 模型加载失败，降级逐文件模式] {e}")
+        use_batch = False
+
+    results = {}
+    total = len(file_list)
+    print(f"\n音效分类中，共 {total} 个文件，batch_size={batch_size}...")
+
+    for batch_start in range(0, total, batch_size):
+        batch_paths = file_list[batch_start : batch_start + batch_size]
+        batch_filenames = [Path(p).name for p in batch_paths]
+
+        if use_batch:
+            try:
+                audio_embs = model.get_audio_embedding_from_filelist(
+                    x=batch_paths, use_tensor=True
+                )
+                audio_embs = audio_embs / audio_embs.norm(dim=-1, keepdim=True)
+
+                with torch.no_grad():
+                    similarity = audio_embs @ text_emb.t()  # [B, N_labels]
+                    probs_batch = torch.softmax(similarity, dim=-1).cpu().numpy()
+
+                for j, (filename, path) in enumerate(zip(batch_filenames, batch_paths)):
+                    top_indices = np.argsort(probs_batch[j])[::-1][:top_k]
+                    labels = [
+                        {"label": LABEL_NAMES[i], "score": round(float(probs_batch[j][i]), 3)}
+                        for i in top_indices
+                    ]
+                    results[filename] = build_result(path, labels)
+            except Exception as e:
+                print(f"  [批次错误，逐文件回退] {e}")
+                for filename, path in zip(batch_filenames, batch_paths):
+                    labels = classify(path, top_k)
+                    results[filename] = build_result(path, labels)
+        else:
+            for filename, path in zip(batch_filenames, batch_paths):
+                labels = classify(path, top_k)
+                results[filename] = build_result(path, labels)
+
+        done = min(batch_start + batch_size, total)
+        print(f"  进度: {done}/{total}", flush=True)
+
+        # 每 500 个中间保存一次，合并已有结果防止历史数据丢失
+        if checkpoint_path and done % 500 < batch_size:
+            save_checkpoint(results)
 
     print(f"音效分类完成，共 {total} 个")
     return results
