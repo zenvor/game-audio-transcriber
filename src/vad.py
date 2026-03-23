@@ -32,8 +32,11 @@ class SileroVAD:
             return True
         try:
             self._load()
+            from config import VAD_THRESHOLD
             wav = self._read_audio(audio_path)  # 内部自动重采样到 16kHz
-            timestamps = self._get_speech_timestamps(wav, self._model)
+            timestamps = self._get_speech_timestamps(
+                wav, self._model, threshold=VAD_THRESHOLD,
+            )
             return len(timestamps) > 0
         except Exception as exc:
             if self._model is None:

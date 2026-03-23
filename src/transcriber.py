@@ -82,6 +82,9 @@ class Transcriber:
             audio_path,
             path_or_hf_repo=self._mlx_repo,
             language=config.LANGUAGE,
+            temperature=0.0,
+            compression_ratio_threshold=None,
+            logprob_threshold=None,
         )
         text = result.get("text", "").strip()
         lang = result.get("language", "unknown")
@@ -90,10 +93,28 @@ class Transcriber:
         duration = segments[-1]["end"] if segments else 0.0
         if segments:
             no_speech_prob = sum(s["no_speech_prob"] for s in segments) / len(segments)
+            avg_logprob = None
+            compression_ratio = None
+            try:
+                lp = [s["avg_logprob"] for s in segments if "avg_logprob" in s]
+                if lp:
+                    avg_logprob = round(sum(lp) / len(lp), 4)
+                cr = [s["compression_ratio"] for s in segments if "compression_ratio" in s]
+                if cr:
+                    compression_ratio = round(sum(cr) / len(cr), 4)
+            except Exception:
+                pass
         else:
             no_speech_prob = 1.0
+            avg_logprob = None
+            compression_ratio = None
 
-        return {"text": text, "lang": lang, "duration": round(duration, 2), "no_speech_prob": round(no_speech_prob, 4)}
+        return {
+            "text": text, "lang": lang, "duration": round(duration, 2),
+            "no_speech_prob": round(no_speech_prob, 4),
+            "avg_logprob": avg_logprob,
+            "compression_ratio": compression_ratio,
+        }
 
     def _transcribe_faster(self, audio_path: str) -> dict:
         print(f"  [DEBUG] 开始转写: {audio_path}", flush=True)
@@ -112,15 +133,27 @@ class Transcriber:
         duration = segments[-1].end if segments else 0.0
         if segments:
             no_speech_prob = sum(s.no_speech_prob for s in segments) / len(segments)
+            avg_logprob = None
+            compression_ratio = None
+            try:
+                lp = [s.avg_logprob for s in segments if hasattr(s, "avg_logprob")]
+                if lp:
+                    avg_logprob = round(sum(lp) / len(lp), 4)
+                cr = [s.compression_ratio for s in segments if hasattr(s, "compression_ratio")]
+                if cr:
+                    compression_ratio = round(sum(cr) / len(cr), 4)
+            except Exception:
+                pass
         else:
-            # segments 为空：Whisper 未生成任何分段（极短音频或解码失败）。
-            # 此时 text 也为空，pipeline 会用双阈值兜底；这里保持高 nsp 但
-            # 不再盲目用 1.0，以便调试时能在日志里看到真实情况。
             no_speech_prob = 0.99
+            avg_logprob = None
+            compression_ratio = None
 
         return {
             "text": text,
             "lang": lang,
             "duration": round(duration, 2),
             "no_speech_prob": round(no_speech_prob, 4),
+            "avg_logprob": avg_logprob,
+            "compression_ratio": compression_ratio,
         }

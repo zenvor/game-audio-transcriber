@@ -56,14 +56,145 @@ def release_cuda_memory(tag: str):
         pass
 
 
-def has_speech_result(result: dict) -> bool:
-    """根据双阈值判断结果是否应归为人声。"""
-    no_speech_prob = float(result["no_speech_prob"])
+# ── 幻觉词表加载 ──────────────────────────────────────────
+import re
+
+_FALLBACK_HALLUCINATION_TEXTS = {
+    "thanks for watching", "thank you for watching",
+    "transcription by eso", "translation by",
+    "like and subscribe", "please subscribe",
+    "subtitles by the amara org community", "satsang with mooji",
+}
+
+_HALLUCINATION_LEXICON_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "data", "whisper_hallucinations_en_zh.txt",
+)
+
+
+def _normalize_for_lexicon(text: str) -> str:
+    """归一化文本：小写、去标点、压缩空白。加载词表和匹配时共用。"""
+    normalized = re.sub(r"[^\w\s]", "", text.lower()).strip()
+    return re.sub(r"\s+", " ", normalized)
+
+
+def _load_hallucination_lexicon() -> set[str]:
+    try:
+        with open(_HALLUCINATION_LEXICON_PATH, "r", encoding="utf-8") as f:
+            lines = {_normalize_for_lexicon(line) for line in f if line.strip()}
+        lines.discard("")
+        if lines:
+            print(f"[幻觉词表] 加载 {len(lines)} 条（{_HALLUCINATION_LEXICON_PATH}）")
+            return lines
+    except Exception as exc:
+        print(f"[幻觉词表] 加载失败（{exc}），降级到内置词表")
+    return set(_FALLBACK_HALLUCINATION_TEXTS)
+
+
+_HALLUCINATION_TEXTS = _load_hallucination_lexicon()
+
+
+def _is_hallucination(text: str) -> bool:
+    return _normalize_for_lexicon(text) in _HALLUCINATION_TEXTS
+
+
+def _is_extreme_repetition(text: str) -> bool:
+    """
+    检测极端重复文本（Whisper 在非语音输入上的典型幻觉模式）。
+    """
+    normalized = _normalize_for_lexicon(text)
+    if not normalized or len(normalized) < 4:
+        return False
+
+    # 1. 单字符连续重复 >= 10（如 "rrrrrrrrrrr"）
+    if re.search(r"(.)\1{9,}", normalized):
+        return True
+
+    # 2. 字符模式循环重复 >= 5 次（如 "huhuhuhuhuh"、"nanananana"）
+    if re.search(r"(.{2,3})\1{4,}", normalized):
+        return True
+
+    words = normalized.split()
+
+    # 3. 单词级连续重复 >= 4 次（如 "10 10 10 10"）
+    if len(words) >= 4:
+        streak = 1
+        for i in range(1, len(words)):
+            if words[i] == words[i - 1]:
+                streak += 1
+                if streak >= 4:
+                    return True
+            else:
+                streak = 1
+
+    # 4. n-gram 短语重复：任何 2~4 词组合出现 >= 2 次（如 "thank you thank you"）
+    if len(words) >= 4:
+        for n in range(2, min(5, len(words))):
+            seen = set()
+            for i in range(len(words) - n + 1):
+                gram = " ".join(words[i:i + n])
+                if gram in seen:
+                    return True
+                seen.add(gram)
+
+    return False
+
+
+# ── 人声/音效判定（多信号联合） ────────────────────────────────
+
+def has_speech_result(result: dict) -> tuple[bool, str]:
+    """
+    多层判定，返回 (is_speech, reason_code)。
+    R0a: 极端 compression_ratio (>= 5.0) → 音效
+    R0b: 极端重复文本 + 统计信号异常 → 音效
+    R1: nsp < 0.6 → 人声
+    R2: 文本为空 → 音效
+    R3: 文本命中幻觉词表 → 音效
+    R4: 多信号补充拦截 → 音效
+    R5: nsp < 0.85 且有文本 → 人声
+    R6: 其余 → 音效
+    """
+    nsp = float(result["no_speech_prob"])
     text = str(result.get("text", "")).strip()
-    return (
-        no_speech_prob < config.NO_SPEECH_THRESHOLD
-        or (text and no_speech_prob < config.NO_SPEECH_THRESHOLD_WITH_TEXT)
-    )
+    cr = result.get("compression_ratio")
+    alp = result.get("avg_logprob")
+
+    # R0a: 极端 compression_ratio 独立拦截（如 cr=13.28，不论 nsp）
+    if cr is not None and cr >= config.HALLUCINATION_EXTREME_COMPRESSION_RATIO:
+        return False, "R0_EXTREME_CR"
+
+    # R0b: 极端重复文本 + 至少一个统计信号异常 → 音效（覆盖 nsp）
+    if text and _is_extreme_repetition(text):
+        has_anomaly = (
+            (cr is not None and cr >= config.HALLUCINATION_COMPRESSION_RATIO)
+            or (alp is not None and alp <= config.HALLUCINATION_AVG_LOGPROB)
+        )
+        if has_anomaly:
+            return False, "R0_EXTREME_REPETITION"
+
+    # R1: 低 nsp 直接判人声
+    if nsp < config.NO_SPEECH_THRESHOLD:
+        return True, "R1_LOW_NSP"
+
+    # R2: 无文本 → 音效
+    if not text:
+        return False, "R2_EMPTY_TEXT"
+
+    # R3: 幻觉词表命中 → 音效
+    if _is_hallucination(text):
+        return False, "R3_HALLUCINATION_LEXICON"
+
+    # R4: 多信号补充拦截（未收录的幻觉）
+    if (cr is not None and cr >= config.HALLUCINATION_COMPRESSION_RATIO
+            and alp is not None and alp <= config.HALLUCINATION_AVG_LOGPROB):
+        return False, "R4_MULTI_SIGNAL"
+
+    # R5: 有文本且 nsp 在灰区 → 人声
+    if nsp < config.NO_SPEECH_THRESHOLD_WITH_TEXT:
+        return True, "R5_TEXT_IN_GRAY_ZONE"
+
+    # R6: nsp 很高 → 音效
+    return False, "R6_HIGH_NSP"
 
 
 def build_speech_result(path: str, result: dict) -> dict:
@@ -72,6 +203,8 @@ def build_speech_result(path: str, result: dict) -> dict:
         "lang": result["lang"],
         "duration": result["duration"],
         "no_speech_prob": result["no_speech_prob"],
+        "avg_logprob": result.get("avg_logprob"),
+        "compression_ratio": result.get("compression_ratio"),
         "path": path,
     }
 
@@ -143,14 +276,15 @@ def recheck_sfx_results(output_dir: str, device: str | None = None):
 
         no_speech_prob = result["no_speech_prob"]
         text = result["text"]
-        if has_speech_result(result):
+        is_speech, reason = has_speech_result(result)
+        if is_speech:
             speech_results[filename] = build_speech_result(path, result)
             updated_sfx.pop(filename, None)
             migrated += 1
-            tag = "迁回语音"
+            tag = f"迁回语音({reason})"
         else:
             kept += 1
-            tag = "保留音效"
+            tag = f"保留音效({reason})"
 
         print(
             f"[{index}/{total}] {filename[:30]:<30} "
@@ -240,9 +374,9 @@ def run(input_dir: str, output_dir: str, device: str | None = None):
             result = transcriber.transcribe(path)
             no_speech_prob = result["no_speech_prob"]
             text = result["text"]
-            has_speech = has_speech_result(result)
+            is_speech, reason = has_speech_result(result)
 
-            if has_speech:
+            if is_speech:
                 # 有人声，保留转写结果
                 speech_results[filename] = build_speech_result(path, result)
             else:
@@ -252,7 +386,7 @@ def run(input_dir: str, output_dir: str, device: str | None = None):
             elapsed = time.time() - start_time
             speed = (i + 1) / elapsed
             eta = (len(todo_whisper) - i - 1) / speed if speed > 0 else 0
-            tag = "语音" if has_speech else "音效"
+            tag = f"语音({reason})" if is_speech else f"音效({reason})"
             print(
                 f"[{i+1}/{len(todo_whisper)}] {filename[:30]:<30} "
                 f"| {tag} | nsp={no_speech_prob:.2f} | {result['text'][:30]} "
