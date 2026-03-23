@@ -16,7 +16,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="游戏音频批量转写工具")
     parser.add_argument("--input",    default=config.INPUT_DIR,  help="输入目录")
     parser.add_argument("--output",   default=config.OUTPUT_DIR, help="输出目录")
-    parser.add_argument("--device",   default=None,              help="cuda / cpu（默认自动）")
+    parser.add_argument("--device",   default=None,              help="cuda / cpu（默认使用 config.DEVICE）")
     parser.add_argument("--model",    default=None,              help="覆盖 config 中的模型")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--sfx-only", action="store_true", help="仅重新分类音效文件（跳过 Whisper 转写）")

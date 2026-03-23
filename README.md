@@ -50,12 +50,14 @@ scripts/export_audio_index.py
 
 ```
 所有 wav 文件
-    ↓ Whisper 全量转写
-    ├── no_speech_prob 低 → 有人声 → 保留转写文字 → results.json
-    └── no_speech_prob 高 → 纯音效 → CLAP 分类 → sfx_results.json
+    ↓ Silero VAD 预分流（默认开启，可在 config.USE_VAD_PREFILTER 关闭）
+    ├── VAD 判定为无语音 → 直接 CLAP 分类 → sfx_results.json
+    └── VAD 判定为含语音 → Whisper 转写 + 双阈值分流
+        ├── 判定为人声 → results.json
+        └── 判定为音效 → CLAP 分类 → sfx_results.json
 ```
 
-利用 Whisper 返回的 `no_speech_prob`（无人声概率）自动区分语音和音效，无需额外的 VAD 模型。
+脚本会先使用 Silero VAD 过滤明显无语音样本，再结合 Whisper 的 `no_speech_prob`（无人声概率）做最终的人声/音效分流。
 
 对短音频，脚本会使用双阈值做更保守的人声判断：如果 `no_speech_prob` 略高，但 Whisper 仍转出了非空文本，仍会优先视为人声，减少短语音被误分到 `sfx_results.json` 的情况。
 
@@ -140,7 +142,7 @@ python main.py [OPTIONS]
 
   --input DIR       输入目录（默认 ./input）
   --output DIR      输出目录（默认 ./output）
-  --device STR      运行设备：cuda / cpu（默认自动检测）
+  --device STR      运行设备：cuda / cpu（默认使用 config.DEVICE）
   --model NAME      覆盖 Whisper 模型（默认 large-v3-turbo / large-v3）
   --sfx-only        仅重新分类音效，跳过 Whisper 转写
   --recheck-sfx     重新检查已有 sfx_results.json，把误分流的人声迁回 results.json
@@ -192,7 +194,7 @@ python3 scripts/rename_audio_from_results.py [OPTIONS]
 python3 scripts/retranscribe_and_rename.py <路径...> [OPTIONS]
 
   <路径...>             音频文件或目录（目录会递归扫描 .wav），支持多个
-  --device STR          运行设备：cuda / cpu（默认自动检测）
+  --device STR          运行设备：cuda / cpu（默认使用 config.DEVICE）
   --model NAME          覆盖 Whisper 模型
   --dry-run             只预览，不实际重命名
 ```
