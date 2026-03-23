@@ -40,6 +40,8 @@ scripts/review_voice_texts.py
                            # 文本纠错
 scripts/rename_audio_from_results.py
                            # 批量整理并生成重命名计划
+scripts/retranscribe_and_rename.py
+                           # 对已整理的音频重新识别并原地重命名
 scripts/export_audio_index.py
                            # 导出索引清单
 ```
@@ -180,6 +182,32 @@ python3 scripts/rename_audio_from_results.py [OPTIONS]
   --plan-out FILE     重命名计划输出路径（默认 output/rename_plan.json）
   --target-root DIR   分类重命名输出根目录（默认 output/renamed_audio）
   --apply             实际执行复制重命名；默认只预览并导出计划
+```
+
+### 重新识别并重命名
+
+对已整理到 `output/renamed_audio/` 下的音频文件重新跑 Whisper 转录，并根据新结果原地重命名。适用于部分文件转录不准或被错误分类的情况。
+
+```
+python3 scripts/retranscribe_and_rename.py <路径...> [OPTIONS]
+
+  <路径...>             音频文件或目录（目录会递归扫描 .wav），支持多个
+  --device STR          运行设备：cuda / cpu（默认自动检测）
+  --model NAME          覆盖 Whisper 模型
+  --dry-run             只预览，不实际重命名
+```
+
+先 dry-run 预览，确认无误后去掉 `--dry-run` 执行：
+
+```bash
+# 预览单个文件
+python3 scripts/retranscribe_and_rename.py output/renamed_audio/sfx/某文件.wav --dry-run
+
+# 预览整个目录
+python3 scripts/retranscribe_and_rename.py output/renamed_audio/sfx/ --dry-run
+
+# 确认后实际执行
+python3 scripts/retranscribe_and_rename.py output/renamed_audio/sfx/
 ```
 
 ### 导出音频索引
